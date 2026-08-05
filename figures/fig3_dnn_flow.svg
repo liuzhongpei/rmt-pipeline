@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050" role="img" aria-labelledby="title desc">
+  <title id="title">DNN training, quantization, and inference in EdgeNet-CoM</title>
+  <desc id="desc">The control plane trains a Float32 4-24-4 MLP and quantizes it to Q16.16. The data plane normalizes four visible header features, performs integer-only inference, and maps the argmax class to local QoS and harness-level coding policy.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#263238"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3976a8"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#37845a"/>
+    </marker>
+    <marker id="arrow-dash" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8065a5"/>
+    </marker>
+    <style>
+      .page { fill:#ffffff; }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:29px; font-weight:700; fill:#17212b; }
+      .lane-title { font-family:Arial, Helvetica, sans-serif; font-size:20px; font-weight:700; fill:#17212b; }
+      .section { font-family:Arial, Helvetica, sans-serif; font-size:18px; font-weight:700; fill:#17212b; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:16px; font-weight:600; fill:#17212b; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:14px; font-weight:400; fill:#36434d; }
+      .tiny { font-family:Arial, Helvetica, sans-serif; font-size:12px; font-weight:400; fill:#45535e; }
+      .lane-control { fill:#e8f1f8; stroke:#3976a8; stroke-width:2; rx:12; ry:12; }
+      .lane-data { fill:#e9f5ee; stroke:#37845a; stroke-width:2; rx:12; ry:12; }
+      .node { fill:#ffffff; stroke:#60717c; stroke-width:1.6; rx:8; ry:8; }
+      .node-blue { fill:#ffffff; stroke:#3976a8; stroke-width:1.8; rx:8; ry:8; }
+      .node-green { fill:#ffffff; stroke:#37845a; stroke-width:1.8; rx:8; ry:8; }
+      .mapping { fill:#f2edf8; stroke:#8065a5; stroke-width:2; rx:10; ry:10; }
+      .note { fill:#f8fafb; stroke:#b6c0c7; stroke-width:1.4; rx:8; ry:8; }
+      .arrow { stroke:#263238; stroke-width:2.4; fill:none; }
+      .arrow-blue { stroke:#3976a8; stroke-width:2.3; fill:none; }
+      .arrow-green { stroke:#37845a; stroke-width:2.3; fill:none; }
+      .dashed { stroke:#8065a5; stroke-width:2; fill:none; stroke-dasharray:8 7; }
+      .head-dark { fill:#263238; }
+      .head-blue { fill:#3976a8; }
+      .head-green { fill:#37845a; }
+      .head-purple { fill:#8065a5; }
+      .divider { stroke:#b7c0c6; stroke-width:1.2; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1800" height="1050"/>
+  <text class="title" x="50" y="43">Fig. 3  DNN training, quantization, and inference in EdgeNet-CoM</text>
+  <line class="divider" x1="50" y1="60" x2="1750" y2="60"/>
+  <text class="tiny" x="1430" y="34">Float32 only in control plane</text>
+  <text class="tiny" x="1600" y="34">Q16.16 in data plane</text>
+
+  <!-- Control plane lane -->
+  <rect class="lane-control" x="50" y="85" width="1190" height="340"/>
+  <text class="lane-title" x="75" y="120">CONTROL PLANE / OFFLINE TRAINING</text>
+  <rect class="node-blue" x="75" y="170" width="215" height="100"/>
+  <text class="label" x="182" y="204" text-anchor="middle">labeled synthetic</text>
+  <text class="label" x="182" y="225" text-anchor="middle">feature vectors</text>
+  <text class="small" x="182" y="250" text-anchor="middle">four classes</text>
+  <path fill="none" class="arrow-blue" d="M290 220 H330"/>
+  <polygon class="head-blue" points="320,214 330,220 320,226"/>
+
+  <rect class="node-blue" x="330" y="170" width="215" height="100"/>
+  <text class="label" x="437" y="204" text-anchor="middle">normalize by scales</text>
+  <text class="small" x="437" y="230" text-anchor="middle">[1500, 65536,</text>
+  <text class="small" x="437" y="249" text-anchor="middle">16384, 256]</text>
+  <path fill="none" class="arrow-blue" d="M545 220 H585"/>
+  <polygon class="head-blue" points="575,214 585,220 575,226"/>
+
+  <rect class="node-blue" x="585" y="170" width="275" height="100"/>
+  <text class="label" x="722" y="201" text-anchor="middle">Float32 MLP</text>
+  <text class="small" x="722" y="226" text-anchor="middle">4 inputs -> 24 ReLU</text>
+  <text class="small" x="722" y="247" text-anchor="middle">-> 4 output logits</text>
+  <path fill="none" class="arrow-blue" d="M860 220 H900"/>
+  <polygon class="head-blue" points="890,214 900,220 890,226"/>
+
+  <rect class="node-blue" x="900" y="170" width="215" height="100"/>
+  <text class="label" x="1007" y="204" text-anchor="middle">softmax cross-entropy</text>
+  <text class="label" x="1007" y="228" text-anchor="middle">+ SGD</text>
+  <text class="small" x="1007" y="250" text-anchor="middle">trained weights</text>
+  <path fill="none" class="arrow-blue" d="M1115 220 H1155"/>
+  <polygon class="head-blue" points="1145,214 1155,220 1145,226"/>
+
+  <rect class="node-blue" x="1155" y="170" width="85" height="100"/>
+  <text class="label" x="1197" y="204" text-anchor="middle">W1,b1</text>
+  <text class="label" x="1197" y="228" text-anchor="middle">W2,b2</text>
+  <text class="small" x="1197" y="250" text-anchor="middle">Float32</text>
+
+  <path fill="none" class="arrow-blue" d="M1197 270 V320"/>
+  <polygon class="head-blue" points="1191,310 1197,320 1203,310"/>
+  <rect class="node-blue" x="925" y="320" width="315" height="75"/>
+  <text class="label" x="1082" y="348" text-anchor="middle">Q16.16 quantization</text>
+  <text class="small" x="1082" y="372" text-anchor="middle">scale 2^16, round, saturate</text>
+  <path fill="none" class="arrow-blue" d="M925 357 H850"/>
+  <polygon class="head-blue" points="860,351 850,357 860,363"/>
+  <rect class="node-blue" x="650" y="320" width="200" height="75"/>
+  <text class="label" x="750" y="348" text-anchor="middle">rmt_dnn_load()</text>
+  <text class="small" x="750" y="372" text-anchor="middle">install model</text>
+  <path fill="none" class="arrow-blue" d="M650 357 H585"/>
+  <polygon class="head-blue" points="595,351 585,357 595,363"/>
+  <rect class="node-blue" x="330" y="320" width="255" height="75"/>
+  <text class="label" x="457" y="348" text-anchor="middle">read-only shared</text>
+  <text class="small" x="457" y="372" text-anchor="middle">Q16.16 model weights</text>
+
+  <!-- Data plane lane -->
+  <rect class="lane-data" x="50" y="465" width="1190" height="340"/>
+  <text class="lane-title" x="75" y="500">DATA PLANE / PER PACKET</text>
+  <rect class="node-green" x="75" y="550" width="255" height="110"/>
+  <text class="label" x="202" y="582" text-anchor="middle">parsed header features</text>
+  <text class="small" x="202" y="608" text-anchor="middle">ipv4.len | tcp.window</text>
+  <text class="small" x="202" y="630" text-anchor="middle">tls.length | tls.type</text>
+  <path fill="none" class="arrow-green" d="M330 605 H370"/>
+  <polygon class="head-green" points="360,599 370,605 360,611"/>
+
+  <rect class="node-green" x="370" y="550" width="220" height="110"/>
+  <text class="label" x="480" y="585" text-anchor="middle">integer normalization</text>
+  <text class="small" x="480" y="613" text-anchor="middle">(f_i &lt;&lt; 16) / s_i</text>
+  <text class="tiny" x="480" y="638" text-anchor="middle">no floating point</text>
+  <path fill="none" class="arrow-green" d="M590 605 H630"/>
+  <polygon class="head-green" points="620,599 630,605 620,611"/>
+
+  <rect class="node-green" x="630" y="550" width="220" height="110"/>
+  <text class="label" x="740" y="585" text-anchor="middle">hidden layer</text>
+  <text class="small" x="740" y="612" text-anchor="middle">24 MACs + ReLU</text>
+  <text class="tiny" x="740" y="638" text-anchor="middle">Q16.16 accumulators</text>
+  <path fill="none" class="arrow-green" d="M850 605 H890"/>
+  <polygon class="head-green" points="880,599 890,605 880,611"/>
+
+  <rect class="node-green" x="890" y="550" width="170" height="110"/>
+  <text class="label" x="975" y="585" text-anchor="middle">output layer</text>
+  <text class="small" x="975" y="612" text-anchor="middle">4 logits</text>
+  <text class="tiny" x="975" y="638" text-anchor="middle">linear output</text>
+  <path fill="none" class="arrow-green" d="M1060 605 H1100"/>
+  <polygon class="head-green" points="1090,599 1100,605 1090,611"/>
+
+  <rect class="node-green" x="1100" y="550" width="140" height="110"/>
+  <text class="label" x="1170" y="585" text-anchor="middle">argmax</text>
+  <text class="small" x="1170" y="612" text-anchor="middle">class c0..c3</text>
+  <text class="tiny" x="1170" y="638" text-anchor="middle">no softmax</text>
+
+  <path fill="none" class="dashed" d="M1197 395 V520"/>
+  <polygon class="head-purple" points="1191,510 1197,520 1203,510"/>
+  <text class="tiny" x="1210" y="475">model loaded once;</text>
+  <text class="tiny" x="1210" y="490">shared read-only</text>
+
+  <!-- Class action mapping -->
+  <rect class="mapping" x="1290" y="85" width="460" height="720"/>
+  <text class="lane-title" x="1315" y="120">CLASS-TO-ACTION MAPPING</text>
+  <text class="small" x="1315" y="145">local mark is a prototype test value;</text>
+  <text class="small" x="1315" y="164">production DSCP encoding is separate</text>
+
+  <path fill="none" class="arrow-green" d="M1240 605 H1285"/>
+  <polygon class="head-green" points="1275,599 1285,605 1275,611"/>
+  <rect class="node" x="1315" y="205" width="410" height="102" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="1335" y="232">c0 Web</text>
+  <text class="small" x="1335" y="255">local mark 0 / intended BE</text>
+  <text class="small" x="1335" y="279">harness: XOR k=8, n=9</text>
+
+  <rect class="node" x="1315" y="325" width="410" height="102" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="1335" y="352">c1 Video</text>
+  <text class="small" x="1335" y="375">local mark 32 / intended CS4</text>
+  <text class="small" x="1335" y="399">harness: RLNC k=8, n=9</text>
+
+  <rect class="node" x="1315" y="445" width="410" height="102" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="1335" y="472">c2 VoIP</text>
+  <text class="small" x="1335" y="495">local mark 46 / intended EF</text>
+  <text class="small" x="1335" y="519">harness: RLNC k=4, n=5</text>
+
+  <rect class="node" x="1315" y="565" width="410" height="102" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="1335" y="592">c3 Bulk</text>
+  <text class="small" x="1335" y="615">local mark 10 / intended AF11</text>
+  <text class="small" x="1335" y="639">harness: no coding</text>
+
+  <rect class="note" x="1315" y="700" width="410" height="80"/>
+  <text class="small" x="1335" y="728">Coding branch is dashed:</text>
+  <text class="small" x="1335" y="750">profile selection only; no in-pipeline</text>
+  <text class="small" x="1335" y="769">repair-packet emission.</text>
+
+  <rect class="note" x="50" y="850" width="1700" height="120"/>
+  <text class="section" x="75" y="883">IMPLEMENTATION BOUNDARY</text>
+  <text class="small" x="75" y="913">The data plane reads only four packet-visible header fields and never decrypts TLS payload bytes.</text>
+  <text class="small" x="75" y="938">Floating point is confined to training; inference uses integer Q16.16 arithmetic and exposes the argmax class to later tables.</text>
+  <text class="tiny" x="75" y="958">A production implementation must encode DSCP into the IPv4 DS field and preserve ECN bits; the prototype local marks are test values.</text>
+</svg>

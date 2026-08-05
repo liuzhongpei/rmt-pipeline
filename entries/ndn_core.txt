@@ -1,0 +1,8 @@
+# NDN core router (upstream = port 2 to the producer)
+table_add cs_t cs_check 1 =>
+table_add cs_t cs_store 2 =>
+table_add cs_hit_t cs_reply 1 1 =>
+table_add pit_t pit_add 1 0 =>
+table_add pit_t pit_serve 2 0 =>
+table_add fib_t fwd 1 0 0x76696465000000000000000000000000/32 => 2
+table_add fib_t drop_pkt 1 0 0x00000000000000000000000000000000/0 =>

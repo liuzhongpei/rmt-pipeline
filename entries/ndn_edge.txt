@@ -1,0 +1,14 @@
+# NDN edge router (connects consumers; upstream = port 2 to core)
+# name components (32-bit): /video = 0x76696465 ("vide")
+#
+# cs_t: role by packet type
+table_add cs_t cs_check 1 =>
+table_add cs_t cs_store 2 =>
+# cs_hit_t: Interest answered from the local Content Store
+table_add cs_hit_t cs_reply 1 1 =>
+# pit_t: Interest miss -> breadcrumb; Data -> reverse path
+table_add pit_t pit_add 1 0 =>
+table_add pit_t pit_serve 2 0 =>
+# fib_t: /video -> core (port 2); anything else -> drop (/0)
+table_add fib_t fwd 1 0 0x76696465000000000000000000000000/32 => 2
+table_add fib_t drop_pkt 1 0 0x00000000000000000000000000000000/0 =>

@@ -1,0 +1,9 @@
+# INT telemetry - switch 1 (INT source, switch_id = 1)
+table_add route forward 10.2.0.0/16 => 2
+# source: watched flow (dst 10.2/16, dport 9000) with no INT mark (tos 0)
+table_add int_source_t int_source 10.2.0.0/16 9000 0 => 1
+# transit entries exist on every switch; int_done=0 keeps a switch
+# from acting as source and transit for the same packet
+table_add int_transit_t int_hop1 0x17 1 0 => 1
+table_add int_transit_t int_hop2 0x17 2 0 => 1
+table_add mac_rewrite set_macs 2 => aa:00:00:00:01:02 aa:00:00:00:01:01

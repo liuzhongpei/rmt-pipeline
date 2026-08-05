@@ -1,0 +1,16 @@
+# Multi-layer nested MPLS entries for p4/mpls.p4
+#
+# Flow A (tunnel termination, nested x2):
+#   stack [100|200|300] -> pop 100 (stage0), pop 200 (stage1),
+#   swap 300->399 + ttl-1, egress port 2 (stage2)
+table_add mpls0 pop0  100 =>
+table_add mpls1 pop1  200 =>
+table_add mpls2 swap2 300 => 399 2
+
+# Flow B (transit LSR): stack [500|600] -> swap 500->501 + ttl-1,
+#   egress port 9; inner label 600 untouched
+table_add mpls0 swap0 500 => 501 9
+
+# stage 3: MAC rewrite per egress port
+table_add mac_rewrite set_macs 2 => 0a:0b:0c:0d:0e:02 0a:0b:0c:0d:0e:fe
+table_add mac_rewrite set_macs 9 => 0a:0b:0c:0d:0e:09 0a:0b:0c:0d:0e:fe

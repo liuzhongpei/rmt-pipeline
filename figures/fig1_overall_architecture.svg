@@ -1,0 +1,234 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080" role="img" aria-labelledby="title desc">
+  <title id="title">EdgeNet-CoM overall architecture with flow-affine parallel execution</title>
+  <desc id="desc">Control plane and P4-inspired compiler configure a software RMT pipeline. A single dispatcher uses RSS hashing and SPSC rings to feed core-pinned workers. A connected coding harness remains outside the RMT fast path.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#263238"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3976a8"/>
+    </marker>
+    <marker id="arrow-dash" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6f7880"/>
+    </marker>
+    <style>
+      .page { fill:#ffffff; }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:28px; font-weight:700; fill:#17212b; }
+      .layer-title { font-family:Arial, Helvetica, sans-serif; font-size:19px; font-weight:700; fill:#17212b; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:16px; font-weight:600; fill:#17212b; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:14px; font-weight:400; fill:#36434d; }
+      .tiny { font-family:Arial, Helvetica, sans-serif; font-size:12px; font-weight:400; fill:#45535e; }
+      .box { stroke:#53636e; stroke-width:2; rx:10; ry:10; }
+      .node { stroke:#60717c; stroke-width:1.6; rx:8; ry:8; }
+      .control { fill:#e8f1f8; stroke:#3976a8; }
+      .compiler { fill:#eef0fb; stroke:#656fa6; }
+      .data { fill:#e9f5ee; stroke:#37845a; }
+      .parallel { fill:#fff2df; stroke:#c77b23; }
+      .harness { fill:#f2edf8; stroke:#8065a5; }
+      .future { fill:#f4f5f6; stroke:#7d8790; stroke-dasharray:9 7; }
+      .stage { fill:#ffffff; stroke:#37845a; stroke-width:1.5; rx:7; ry:7; }
+      .arrow { stroke:#263238; stroke-width:2.4; fill:none; }
+      .arrow-blue { stroke:#3976a8; stroke-width:2.2; fill:none; }
+      .dashed { stroke:#6f7880; stroke-width:2; fill:none; stroke-dasharray:8 7; }
+      .head-dark { fill:#263238; }
+      .head-blue { fill:#3976a8; }
+      .head-gray { fill:#6f7880; }
+      .shared { stroke:#3976a8; stroke-width:1.8; fill:none; stroke-dasharray:5 5; }
+      .divider { stroke:#b7c0c6; stroke-width:1.2; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1800" height="1080"/>
+  <text class="title" x="50" y="42">Fig. 1  EdgeNet-CoM overall architecture with flow-affine parallel execution</text>
+  <line class="divider" x1="50" y1="58" x2="1750" y2="58"/>
+  <rect x="1325" y="18" width="16" height="16" fill="#e9f5ee" stroke="#37845a"/>
+  <text class="tiny" x="1350" y="31">implemented / evaluated</text>
+  <rect x="1510" y="18" width="16" height="16" class="future"/>
+  <text class="tiny" x="1535" y="31">proposed or deployment boundary</text>
+
+  <!-- Control plane -->
+  <rect class="box control" x="50" y="78" width="1700" height="130"/>
+  <text class="layer-title" x="75" y="108">CONTROL PLANE</text>
+  <rect class="node" x="75" y="125" width="320" height="55" fill="#ffffff" stroke="#3976a8"/>
+  <text class="label" x="235" y="149" text-anchor="middle">training data + policy tables</text>
+  <text class="small" x="235" y="169" text-anchor="middle">labels, QoS map, LPM, coding profiles</text>
+  <path fill="none" class="arrow-blue" d="M395 152 H455"/>
+  <polygon class="head-blue" points="445,146 455,152 445,158"/>
+  <rect class="node" x="455" y="125" width="260" height="55" fill="#ffffff" stroke="#3976a8"/>
+  <text class="label" x="585" y="149" text-anchor="middle">Float32 MLP training</text>
+  <text class="small" x="585" y="169" text-anchor="middle">control-plane only</text>
+  <path fill="none" class="arrow-blue" d="M715 152 H775"/>
+  <polygon class="head-blue" points="765,146 775,152 765,158"/>
+  <rect class="node" x="775" y="125" width="255" height="55" fill="#ffffff" stroke="#3976a8"/>
+  <text class="label" x="902" y="149" text-anchor="middle">Q16.16 quantization</text>
+  <text class="small" x="902" y="169" text-anchor="middle">round and saturate</text>
+  <path fill="none" class="arrow-blue" d="M1030 152 H1090"/>
+  <polygon class="head-blue" points="1080,146 1090,152 1080,158"/>
+  <rect class="node" x="1090" y="125" width="320" height="55" fill="#ffffff" stroke="#3976a8"/>
+  <text class="label" x="1250" y="149" text-anchor="middle">model and table loader</text>
+  <text class="small" x="1250" y="169" text-anchor="middle">read-only weights during inference</text>
+  <text class="small" x="1450" y="143">Outputs:</text>
+  <text class="tiny" x="1450" y="163">DNN weights | QoS policy | route entries</text>
+  <text class="tiny" x="1450" y="180">coding profile table</text>
+
+  <!-- Compiler -->
+  <rect class="box compiler" x="50" y="225" width="1700" height="105"/>
+  <text class="layer-title" x="75" y="255">P4-INSPIRED SOFTWARE COMPILER</text>
+  <rect class="node" x="75" y="270" width="270" height="38" fill="#ffffff" stroke="#656fa6"/>
+  <text class="label" x="210" y="295" text-anchor="middle">P4-like source</text>
+  <path fill="none" class="arrow-blue" d="M345 289 H420"/>
+  <polygon class="head-blue" points="410,283 420,289 410,295"/>
+  <rect class="node" x="420" y="270" width="430" height="38" fill="#ffffff" stroke="#656fa6"/>
+  <text class="label" x="635" y="295" text-anchor="middle">parser FSM + match-action tables</text>
+  <path fill="none" class="arrow-blue" d="M850 289 H925"/>
+  <polygon class="head-blue" points="915,283 925,289 915,295"/>
+  <rect class="node" x="925" y="270" width="430" height="38" fill="#ffffff" stroke="#656fa6"/>
+  <text class="label" x="1140" y="295" text-anchor="middle">stage metadata + DNN extern binding</text>
+  <text class="small" x="1410" y="285">software target</text>
+  <text class="tiny" x="1410" y="304">not a hardware P4 switch</text>
+  <path fill="none" class="arrow-blue" d="M1355 289 H1480"/>
+  <polygon class="head-blue" points="1470,283 1480,289 1470,295"/>
+  <path fill="none" class="arrow-blue" d="M1250 180 V250"/>
+  <polygon class="head-blue" points="1244,240 1250,250 1256,240"/>
+
+  <!-- Data plane and dispatcher -->
+  <rect class="box parallel" x="50" y="355" width="1700" height="365"/>
+  <text class="layer-title" x="75" y="386">SOFTWARE RMT DATA PLANE + PARALLEL EXECUTION</text>
+  <text class="small" x="75" y="412">N6 post-decapsulation input; one dispatcher preserves wire-arrival order before RSS assignment</text>
+
+  <rect class="node" x="75" y="465" width="175" height="62" fill="#ffffff" stroke="#c77b23"/>
+  <text class="label" x="162" y="490" text-anchor="middle">N6 packet</text>
+  <text class="small" x="162" y="511" text-anchor="middle">Ethernet / IPv4 / TCP / TLS</text>
+  <path fill="none" class="arrow" d="M250 496 H300"/>
+  <polygon class="head-dark" points="290,490 300,496 290,502"/>
+  <rect class="node" x="300" y="465" width="205" height="62" fill="#ffffff" stroke="#c77b23"/>
+  <text class="label" x="402" y="490" text-anchor="middle">single dispatcher</text>
+  <text class="small" x="402" y="511" text-anchor="middle">wire-arrival order</text>
+  <path fill="none" class="arrow" d="M505 496 H555"/>
+  <polygon class="head-dark" points="545,490 555,496 545,502"/>
+  <rect class="node" x="555" y="465" width="210" height="62" fill="#ffffff" stroke="#c77b23"/>
+  <text class="label" x="660" y="490" text-anchor="middle">RSS 5-tuple hash</text>
+  <text class="small" x="660" y="511" text-anchor="middle">flow-affine queue choice</text>
+  <path fill="none" class="arrow" d="M765 496 H815"/>
+  <polygon class="head-dark" points="805,490 815,496 805,502"/>
+  <rect class="node" x="815" y="465" width="150" height="62" fill="#ffffff" stroke="#c77b23"/>
+  <text class="label" x="890" y="490" text-anchor="middle">SPSC rings</text>
+  <text class="small" x="890" y="511" text-anchor="middle">q0 ... qN-1</text>
+
+  <!-- Fan-out -->
+  <path fill="none" class="arrow" d="M965 496 H1010 V430 H1050"/>
+  <polygon class="head-dark" points="1040,424 1050,430 1040,436"/>
+  <path fill="none" class="arrow" d="M965 496 H1050"/>
+  <polygon class="head-dark" points="1040,490 1050,496 1040,502"/>
+  <path fill="none" class="arrow" d="M965 496 H1010 V560 H1050"/>
+  <polygon class="head-dark" points="1040,554 1050,560 1040,566"/>
+  <path fill="none" class="arrow" d="M965 496 H1010 V625 H1050"/>
+  <polygon class="head-dark" points="1040,619 1050,625 1040,631"/>
+  <text class="tiny" x="978" y="447">FIFO</text>
+  <text class="tiny" x="978" y="583">same flow -> same queue</text>
+
+  <!-- Worker lanes -->
+  <rect class="node" x="1050" y="405" width="560" height="45" fill="#fffaf2" stroke="#c77b23"/>
+  <text class="small" x="1068" y="433">worker q0 (core pinned)</text>
+  <rect class="stage" x="1220" y="414" width="78" height="28"/>
+  <text class="tiny" x="1259" y="433" text-anchor="middle">Parse</text>
+  <rect class="stage" x="1308" y="414" width="78" height="28"/>
+  <text class="tiny" x="1347" y="433" text-anchor="middle">DNN</text>
+  <rect class="stage" x="1396" y="414" width="78" height="28"/>
+  <text class="tiny" x="1435" y="433" text-anchor="middle">QoS</text>
+  <rect class="stage" x="1484" y="414" width="108" height="28"/>
+  <text class="tiny" x="1538" y="433" text-anchor="middle">LPM/MAC</text>
+
+  <rect class="node" x="1050" y="470" width="560" height="45" fill="#fffaf2" stroke="#c77b23"/>
+  <text class="small" x="1068" y="498">worker q1 (core pinned)</text>
+  <rect class="stage" x="1220" y="479" width="78" height="28"/>
+  <text class="tiny" x="1259" y="498" text-anchor="middle">Parse</text>
+  <rect class="stage" x="1308" y="479" width="78" height="28"/>
+  <text class="tiny" x="1347" y="498" text-anchor="middle">DNN</text>
+  <rect class="stage" x="1396" y="479" width="78" height="28"/>
+  <text class="tiny" x="1435" y="498" text-anchor="middle">QoS</text>
+  <rect class="stage" x="1484" y="479" width="108" height="28"/>
+  <text class="tiny" x="1538" y="498" text-anchor="middle">LPM/MAC</text>
+
+  <rect class="node" x="1050" y="535" width="560" height="45" fill="#fffaf2" stroke="#c77b23"/>
+  <text class="small" x="1068" y="563">worker q2 (core pinned)</text>
+  <rect class="stage" x="1220" y="544" width="78" height="28"/>
+  <text class="tiny" x="1259" y="563" text-anchor="middle">Parse</text>
+  <rect class="stage" x="1308" y="544" width="78" height="28"/>
+  <text class="tiny" x="1347" y="563" text-anchor="middle">DNN</text>
+  <rect class="stage" x="1396" y="544" width="78" height="28"/>
+  <text class="tiny" x="1435" y="563" text-anchor="middle">QoS</text>
+  <rect class="stage" x="1484" y="544" width="108" height="28"/>
+  <text class="tiny" x="1538" y="563" text-anchor="middle">LPM/MAC</text>
+
+  <rect class="node" x="1050" y="600" width="560" height="45" fill="#fffaf2" stroke="#c77b23"/>
+  <text class="small" x="1068" y="628">worker qN-1 (core pinned)</text>
+  <rect class="stage" x="1220" y="609" width="78" height="28"/>
+  <text class="tiny" x="1259" y="628" text-anchor="middle">Parse</text>
+  <rect class="stage" x="1308" y="609" width="78" height="28"/>
+  <text class="tiny" x="1347" y="628" text-anchor="middle">DNN</text>
+  <rect class="stage" x="1396" y="609" width="78" height="28"/>
+  <text class="tiny" x="1435" y="628" text-anchor="middle">QoS</text>
+  <rect class="stage" x="1484" y="609" width="108" height="28"/>
+  <text class="tiny" x="1538" y="628" text-anchor="middle">LPM/MAC</text>
+
+  <path fill="none" class="arrow" d="M1610 427 H1660 V496 H1700"/>
+  <polygon class="head-dark" points="1690,490 1700,496 1690,502"/>
+  <path fill="none" class="arrow" d="M1610 492 H1700"/>
+  <polygon class="head-dark" points="1690,486 1700,492 1690,498"/>
+  <path fill="none" class="arrow" d="M1610 557 H1660 V496 H1700"/>
+  <polygon class="head-dark" points="1690,490 1700,496 1690,502"/>
+  <path fill="none" class="arrow" d="M1610 622 H1660 V496 H1700"/>
+  <polygon class="head-dark" points="1690,490 1700,496 1690,502"/>
+  <rect class="node" x="1640" y="465" width="105" height="62" fill="#ffffff" stroke="#37845a"/>
+  <text class="label" x="1692" y="490" text-anchor="middle">marked</text>
+  <text class="small" x="1692" y="511" text-anchor="middle">output</text>
+
+  <rect class="node" x="1060" y="655" width="360" height="35" fill="#ffffff" stroke="#3976a8"/>
+  <text class="small" x="1240" y="678" text-anchor="middle">shared read-only DNN weights + policy tables</text>
+  <path fill="none" class="shared" d="M1240 655 V385"/>
+  <text class="tiny" x="1260" y="397">read-only during inference</text>
+
+  <!-- Harness and future boundary -->
+  <rect class="box harness" x="50" y="755" width="820" height="220"/>
+  <text class="layer-title" x="75" y="787">CODING POLICY HARNESS</text>
+  <text class="small" x="75" y="810">connected after rmt_process(); outside the RMT fast path</text>
+  <rect class="node" x="75" y="835" width="150" height="50" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="150" y="865" text-anchor="middle">class metadata</text>
+  <path fill="none" class="dashed" d="M225 860 H275"/>
+  <polygon class="head-gray" points="265,854 275,860 265,866"/>
+  <rect class="node" x="275" y="835" width="150" height="50" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="350" y="865" text-anchor="middle">profile lookup</text>
+  <path fill="none" class="dashed" d="M425 860 H475"/>
+  <polygon class="head-gray" points="465,854 475,860 465,866"/>
+  <rect class="node" x="475" y="835" width="180" height="50" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="565" y="856" text-anchor="middle">generation</text>
+  <text class="label" x="565" y="875" text-anchor="middle">accounting</text>
+  <path fill="none" class="dashed" d="M655 860 H705"/>
+  <polygon class="head-gray" points="695,854 705,860 695,866"/>
+  <rect class="node" x="705" y="835" width="140" height="50" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="775" y="856" text-anchor="middle">RLNC/XOR</text>
+  <text class="small" x="775" y="875" text-anchor="middle">tests</text>
+  <text class="tiny" x="75" y="925">No repair-packet injection into the RMT deparser.</text>
+  <path fill="none" class="dashed" d="M1692 527 V800 H845"/>
+  <polygon class="head-gray" points="855,794 845,800 855,806"/>
+
+  <rect class="box future" x="920" y="755" width="830" height="220"/>
+  <text class="layer-title" x="945" y="787">DEPLOYMENT BOUNDARIES</text>
+  <text class="small" x="945" y="810">future work / not implemented in the evaluated artifact</text>
+  <rect class="node" x="945" y="835" width="175" height="55" fill="#ffffff" stroke="#7d8790"/>
+  <text class="label" x="1032" y="858" text-anchor="middle">N3/N9 GTP-U</text>
+  <text class="small" x="1032" y="878" text-anchor="middle">decapsulation</text>
+  <rect class="node" x="1150" y="835" width="175" height="55" fill="#ffffff" stroke="#7d8790"/>
+  <text class="label" x="1237" y="858" text-anchor="middle">SMF/PFCP</text>
+  <text class="small" x="1237" y="878" text-anchor="middle">authorization</text>
+  <rect class="node" x="1355" y="835" width="175" height="55" fill="#ffffff" stroke="#7d8790"/>
+  <text class="label" x="1442" y="858" text-anchor="middle">real NIC I/O</text>
+  <text class="small" x="1442" y="878" text-anchor="middle">packet integration</text>
+  <rect class="node" x="1560" y="835" width="165" height="55" fill="#ffffff" stroke="#7d8790"/>
+  <text class="label" x="1642" y="858" text-anchor="middle">link feedback</text>
+  <text class="small" x="1642" y="878" text-anchor="middle">satellite parameters</text>
+  <text class="tiny" x="945" y="925">The motivating satellite-UPF context is not a validated deployment target.</text>
+
+  <text class="tiny" x="50" y="1030">Solid = implemented/evaluated. Dashed = proposed or deployment boundary. One dispatcher assumption is required for the ordering guarantee.</text>
+</svg>

@@ -1,0 +1,10 @@
+# DNN-based in-network IDS (p4/ids.p4)
+#
+# ids_t: run the MLP on TCP (proto 6)
+table_add ids_t classify 6 =>
+# verdict_t: class 1 (anomaly) -> quarantine (drop)
+table_add verdict_t quarantine 1 =>
+table_add verdict_t nop 0 =>
+# route: plain IPv4 LPM forwarding
+table_add route forward 10.0.0.0/8 => 2
+table_add route forward 192.168.0.0/16 => 3

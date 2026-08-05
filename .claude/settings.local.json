@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/gf/.claude/skills/academic-research-skills/skills/academic-paper-reviewer -type f | head -50)",
+      "Read(//home/gf/.claude/skills/academic-research-skills/academic-paper-reviewer/**)",
+      "Read(//home/gf/.claude/skills/**)",
+      "Read(//home/gf/.claude/**)",
+      "Bash(mkdir -p /tmp/edgenet_review && tail -5 /home/gf/Project/rmt-pipeline/paper_innetwork_computing.md && grep -c \"^\\\\[\" /home/gf/Project/rmt-pipeline/paper_innetwork_computing.md)",
+      "Read(//proc/**)",
+      "Bash(gcc --version)",
+      "Bash(python3 -c \"import scapy; print\\('scapy OK', scapy.__version__\\)\")",
+      "Bash(make clean *)",
+      "Bash(make all *)",
+      "Bash(echo \"BUILD_RC=$?\")",
+      "Bash(./bin/rmt_tests)",
+      "Bash(./bin/enc_classify_demo)",
+      "Bash(lscpu)",
+      "Bash(./bin/rmt_tests mq *)",
+      "Bash(./bin/rmt_tests tcpmq *)",
+      "Bash(./bin/nc_demo)",
+      "Bash(make pgo *)",
+      "Bash(./bin/rmt_tests bulk *)",
+      "Bash(./scripts/bench_real_traffic.sh --packets 4000)",
+      "Bash(python3 -)",
+      "Bash(./scripts/bench_all.sh --quick)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(chmod +x scripts/*.sh)",
+      "Bash(bash scripts/bench_all.sh --quick)",
+      "Bash(grep -c '^```' paper_innetwork_computing.md)",
+      "Bash(python3 -c \"print\\('core',494+187+158+398+168+389+933+368+212+21+182,'app',644+849,'test',899+532+455\\)\")"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+# Dynamic network telescope (p4/telescope.p4)
+#
+# Ports: 1 = uplink (Internet), 2 = internal LAN, 9 = telescope collector
+#
+# direction from the ingress link
+table_add dir_t set_dir 2 => 1
+table_add dir_t set_dir 1 => 0
+
+# utilization inference: outbound (dir=1) marks its source as used
+table_add mark4_t mark4 1 =>
+table_add mark6_t mark6 1 =>
+
+# monitored space (space granularity, control-plane configurable):
+# inbound (dir=0) towards these prefixes probes the utilization table
+table_add probe4_t probe4 0 10.9.0.0/16 =>
+table_add probe6_t probe6 0 2001:db8:9::/48 =>
+
+# capture decision (dir, scoped, used):
+#   inbound + monitored + unused -> telescope collector (port 9)
+#   inbound + monitored + used   -> confidential, forward to LAN
+#   inbound + unmonitored        -> forward to LAN
+#   outbound                     -> forward to uplink
+table_add decide_t capture 0 1 0 => 9
+table_add decide_t fwd     0 1 1 => 2
+table_add decide_t fwd     0 0 0 => 2
+table_add decide_t fwd     1 0 0 => 1

@@ -1,0 +1,16 @@
+# Encrypted traffic classification (p4/enc_classify.p4)
+#
+# classify_t: run MLP on TLS application data (type 23)
+table_add classify_t classify 23 =>
+# qos_t: QoS marking per traffic class
+table_add qos_t mark_web 0 =>
+table_add qos_t mark_video 1 =>
+table_add qos_t mark_voip 2 =>
+table_add qos_t mark_bulk 3 =>
+# route: IPv4 LPM forwarding
+table_add route forward 10.0.0.0/8 => 2
+table_add route forward 192.168.0.0/16 => 3
+table_set_default route drop_pkt
+# mac_rewrite: next-hop per egress port
+table_add mac_rewrite set_macs 2 => 0a:0b:0c:0d:0e:02 0a:0b:0c:0d:0e:01
+table_add mac_rewrite set_macs 3 => 0a:0b:0c:0d:0e:03 0a:0b:0c:0d:0e:01

@@ -1,0 +1,6 @@
+# INT telemetry - switch 3 (INT transit + last hop, switch_id = 3)
+table_add route forward 10.2.0.0/16 => 7
+table_add int_source_t int_source 10.9.0.0/16 9000 0 => 3
+table_add int_transit_t int_hop1 0x17 1 0 => 3
+table_add int_transit_t int_hop2 0x17 2 0 => 3
+table_add mac_rewrite set_macs 7 => aa:00:00:00:03:07 aa:00:00:00:03:01

@@ -1,0 +1,12 @@
+# VXLAN gateway entries for p4/vxlan.p4
+#
+# decap: terminate VNI 5000, then bridge on inner dst MAC
+table_add vxlan_term vxlan_decap 5000 =>
+table_add l2 set_port 02:00:00:00:00:07 => 7
+
+# encap: tenant prefix 192.168.1.0/24 -> VXLAN VNI 5000,
+#        outer 10.0.0.1 -> 10.0.0.2
+table_add tenant vxlan_encap 192.168.1.0/24 => 5000 10.0.0.1 10.0.0.2
+
+# underlay route for the encapsulated packet
+table_add underlay route_underlay 10.0.0.2/32 => 8 52:54:00:00:00:02 52:54:00:00:00:01

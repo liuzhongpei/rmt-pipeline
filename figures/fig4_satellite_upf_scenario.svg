@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050" role="img" aria-labelledby="title desc">
+  <title id="title">Satellite-UPF application scenario and deployment boundary</title>
+  <desc id="desc">Encrypted traffic reaches an N6 post-decapsulation software RMT pipeline at a gateway. Destination-based forwarding is evaluated, while class-aware path selection, satellite feedback, and coding emission are shown as proposed extensions.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#263238"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7d8790"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8065a5"/>
+    </marker>
+    <style>
+      .page { fill:#ffffff; }
+      .title { font-family:Arial, Helvetica, sans-serif; font-size:29px; font-weight:700; fill:#17212b; }
+      .section { font-family:Arial, Helvetica, sans-serif; font-size:19px; font-weight:700; fill:#17212b; }
+      .label { font-family:Arial, Helvetica, sans-serif; font-size:16px; font-weight:600; fill:#17212b; }
+      .small { font-family:Arial, Helvetica, sans-serif; font-size:14px; font-weight:400; fill:#36434d; }
+      .tiny { font-family:Arial, Helvetica, sans-serif; font-size:12px; font-weight:400; fill:#45535e; }
+      .node { fill:#ffffff; stroke:#60717c; stroke-width:1.8; rx:10; ry:10; }
+      .note { fill:#f8fafb; stroke:#b6c0c7; stroke-width:1.4; rx:8; ry:8; }
+      .endpoint { fill:#f6f1fa; stroke:#8065a5; stroke-width:2; rx:12; ry:12; }
+      .boundary { fill:#f4f5f6; stroke:#7d8790; stroke-width:2; stroke-dasharray:9 7; rx:12; ry:12; }
+      .n6 { fill:#e8f1f8; stroke:#3976a8; stroke-width:2.2; rx:12; ry:12; }
+      .rmt { fill:#e9f5ee; stroke:#37845a; stroke-width:2.2; rx:12; ry:12; }
+      .gateway { fill:#fff2df; stroke:#c77b23; stroke-width:2.2; rx:12; ry:12; }
+      .policy { fill:#f2edf8; stroke:#8065a5; stroke-width:2; stroke-dasharray:9 7; rx:12; ry:12; }
+      .harness { fill:#f8f4fb; stroke:#8065a5; stroke-width:2; stroke-dasharray:8 7; rx:10; ry:10; }
+      .solid { stroke:#263238; stroke-width:2.8; fill:none; }
+      .dashed { stroke:#7d8790; stroke-width:2.2; fill:none; stroke-dasharray:9 7; }
+      .purple-dash { stroke:#8065a5; stroke-width:2.2; fill:none; stroke-dasharray:9 7; }
+      .head-dark { fill:#263238; }
+      .head-gray { fill:#7d8790; }
+      .head-purple { fill:#8065a5; }
+      .divider { stroke:#b7c0c6; stroke-width:1.2; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1800" height="1050"/>
+  <text class="title" x="50" y="43">Fig. 4  Satellite-UPF application scenario and deployment boundary</text>
+  <line class="divider" x1="50" y1="60" x2="1750" y2="60"/>
+  <rect x="1260" y="20" width="16" height="16" fill="#e9f5ee" stroke="#37845a"/>
+  <text class="tiny" x="1285" y="33">evaluated N6 path</text>
+  <rect x="1420" y="20" width="16" height="16" class="boundary"/>
+  <text class="tiny" x="1445" y="33">future/proposed boundary</text>
+
+  <!-- User and N3/N9 boundary -->
+  <rect class="endpoint" x="55" y="360" width="210" height="155"/>
+  <text class="section" x="160" y="400" text-anchor="middle">UEs</text>
+  <text class="label" x="160" y="428" text-anchor="middle">satellite access</text>
+  <text class="small" x="160" y="456" text-anchor="middle">encrypted HTTPS/TLS</text>
+  <text class="tiny" x="160" y="483" text-anchor="middle">application payload remains encrypted</text>
+  <path fill="none" class="solid" d="M265 438 H320"/>
+  <polygon class="head-dark" points="310,432 320,438 310,444"/>
+
+  <rect class="boundary" x="320" y="300" width="260" height="275"/>
+  <text class="section" x="345" y="338">N3 / N9</text>
+  <text class="label" x="345" y="368">GTP-U over UDP/2152</text>
+  <rect class="node" x="345" y="395" width="210" height="65" fill="#ffffff" stroke="#7d8790"/>
+  <text class="label" x="450" y="422" text-anchor="middle">outer IP/UDP</text>
+  <text class="small" x="450" y="444" text-anchor="middle">TEID + inner packet</text>
+  <text class="tiny" x="345" y="500">decapsulation required before</text>
+  <text class="tiny" x="345" y="519">the current parser</text>
+  <path fill="none" class="dashed" d="M580 438 H625"/>
+  <polygon class="head-gray" points="615,432 625,438 615,444"/>
+
+  <!-- N6 and RMT -->
+  <rect class="n6" x="625" y="320" width="245" height="235"/>
+  <text class="section" x="650" y="358">N6 reference point</text>
+  <text class="label" x="650" y="388">post-decapsulation</text>
+  <rect class="node" x="650" y="415" width="195" height="74" fill="#ffffff" stroke="#3976a8"/>
+  <text class="small" x="747" y="443" text-anchor="middle">Ethernet / IPv4 / TCP</text>
+  <text class="small" x="747" y="466" text-anchor="middle">/ TLS</text>
+  <text class="tiny" x="650" y="520">solid = evaluated input boundary</text>
+  <path fill="none" class="solid" d="M870 438 H925"/>
+  <polygon class="head-dark" points="915,432 925,438 915,444"/>
+
+  <rect class="rmt" x="925" y="270" width="390" height="335"/>
+  <text class="section" x="950" y="307">EdgeNet-CoM software RMT</text>
+  <text class="small" x="950" y="332">commodity x86 prototype</text>
+  <rect class="node" x="950" y="360" width="340" height="62" fill="#ffffff" stroke="#37845a"/>
+  <text class="label" x="1120" y="385" text-anchor="middle">parse -> Q16.16 classify</text>
+  <text class="small" x="1120" y="406" text-anchor="middle">four visible header features</text>
+  <path fill="none" class="solid" d="M1120 422 V447"/>
+  <polygon class="head-dark" points="1114,437 1120,447 1126,437"/>
+  <rect class="node" x="950" y="447" width="340" height="62" fill="#ffffff" stroke="#37845a"/>
+  <text class="label" x="1120" y="472" text-anchor="middle">local QoS mark -> destination LPM</text>
+  <text class="small" x="1120" y="494" text-anchor="middle">MAC rewrite / deparser</text>
+  <path fill="none" class="solid" d="M1315 438 H1370"/>
+  <polygon class="head-dark" points="1360,432 1370,438 1360,444"/>
+
+  <!-- Gateway and paths -->
+  <rect class="gateway" x="1370" y="295" width="250" height="285"/>
+  <text class="section" x="1495" y="332" text-anchor="middle">gateway / UPF</text>
+  <text class="label" x="1495" y="360" text-anchor="middle">forwarding boundary</text>
+  <rect class="node" x="1400" y="395" width="190" height="62" fill="#ffffff" stroke="#c77b23"/>
+  <text class="label" x="1495" y="421" text-anchor="middle">destination-based</text>
+  <text class="small" x="1495" y="443" text-anchor="middle">route decision</text>
+  <text class="tiny" x="1400" y="510">class-aware path choice is</text>
+  <text class="tiny" x="1400" y="528">shown as proposed below</text>
+
+  <path fill="none" class="solid" d="M1620 360 H1665"/>
+  <polygon class="head-dark" points="1655,354 1665,360 1655,366"/>
+  <path fill="none" class="solid" d="M1620 415 H1665"/>
+  <polygon class="head-dark" points="1655,409 1665,415 1655,421"/>
+  <path fill="none" class="solid" d="M1620 470 H1665"/>
+  <polygon class="head-dark" points="1655,464 1665,470 1655,476"/>
+  <path fill="none" class="solid" d="M1620 525 H1665"/>
+  <polygon class="head-dark" points="1655,519 1665,525 1655,531"/>
+
+  <rect class="endpoint" x="1665" y="330" width="105" height="55"/>
+  <text class="label" x="1717" y="354" text-anchor="middle">GEO</text>
+  <text class="tiny" x="1717" y="373" text-anchor="middle">relay</text>
+  <rect class="endpoint" x="1665" y="397" width="105" height="55"/>
+  <text class="label" x="1717" y="421" text-anchor="middle">LEO</text>
+  <text class="tiny" x="1717" y="440" text-anchor="middle">spot beam</text>
+  <rect class="endpoint" x="1665" y="464" width="105" height="55"/>
+  <text class="label" x="1717" y="488" text-anchor="middle">ISL</text>
+  <text class="tiny" x="1717" y="507" text-anchor="middle">relay</text>
+  <rect class="endpoint" x="1665" y="531" width="105" height="55"/>
+  <text class="label" x="1717" y="555" text-anchor="middle">terrestrial</text>
+  <text class="tiny" x="1717" y="574" text-anchor="middle">backhaul</text>
+  <text class="small" x="1400" y="625">different delay, capacity, and loss</text>
+
+  <!-- Proposed policy -->
+  <rect class="policy" x="1010" y="90" width="610" height="130"/>
+  <text class="section" x="1035" y="125">OPERATOR POLICY / PROPOSED MODE B</text>
+  <text class="label" x="1035" y="158">(dst_prefix, class) + link monitoring</text>
+  <text class="label" x="1035" y="184">-> class-aware path choice</text>
+  <text class="small" x="1035" y="207">not implemented or evaluated in this prototype</text>
+  <path fill="none" class="purple-dash" d="M1315 220 V270"/>
+  <polygon class="head-purple" points="1309,260 1315,270 1321,260"/>
+
+  <!-- Coding harness -->
+  <rect class="harness" x="620" y="670" width="700" height="190"/>
+  <text class="section" x="650" y="707">CONNECTED CODING POLICY HARNESS</text>
+  <text class="small" x="650" y="733">class metadata from RMT output; outside the RMT fast path</text>
+  <rect class="node" x="650" y="765" width="170" height="52" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="735" y="796" text-anchor="middle">profile lookup</text>
+  <path fill="none" class="purple-dash" d="M820 791 H865"/>
+  <polygon class="head-purple" points="855,785 865,791 855,797"/>
+  <rect class="node" x="865" y="765" width="190" height="52" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="960" y="787" text-anchor="middle">generation</text>
+  <text class="small" x="960" y="807" text-anchor="middle">accounting</text>
+  <path fill="none" class="purple-dash" d="M1055 791 H1100"/>
+  <polygon class="head-purple" points="1090,785 1100,791 1090,797"/>
+  <rect class="node" x="1100" y="765" width="190" height="52" fill="#ffffff" stroke="#8065a5"/>
+  <text class="label" x="1195" y="787" text-anchor="middle">RLNC / XOR</text>
+  <text class="small" x="1195" y="807" text-anchor="middle">profile tests</text>
+  <path fill="none" class="purple-dash" d="M1120 605 V765"/>
+  <polygon class="head-purple" points="1114,755 1120,765 1126,755"/>
+  <text class="tiny" x="1140" y="675">dashed: no repair emission</text>
+
+  <!-- Policy labels -->
+  <rect class="note" x="50" y="660" width="490" height="205"/>
+  <text class="section" x="75" y="697">ILLUSTRATIVE LOCAL POLICY</text>
+  <text class="small" x="75" y="730">Web    -> BE / XOR</text>
+  <text class="small" x="75" y="758">Video  -> CS4 / RLNC</text>
+  <text class="small" x="75" y="786">VoIP   -> EF / RLNC</text>
+  <text class="small" x="75" y="814">Bulk   -> AF11 / no coding</text>
+  <text class="tiny" x="75" y="844">local labels, not standardized entitlements</text>
+
+  <!-- Boundary note -->
+  <rect class="boundary" x="50" y="915" width="1700" height="92"/>
+  <text class="section" x="75" y="946">EVIDENCE BOUNDARY</text>
+  <text class="small" x="75" y="970">Evaluated: post-decapsulation N6 software path on commodity x86. Not evaluated: satellite-link traces, real NIC I/O, SMF/PFCP integration, GTP-U parsing, or 3GPP UPF conformance.</text>
+  <text class="tiny" x="75" y="992">Solid arrows = evaluated path. Dashed boxes/arrows = proposed extension or deployment boundary.</text>
+</svg>
