@@ -462,6 +462,7 @@ static void test_joint_pipeline(void)
 
     /* Set up the classification pipeline */
     rmt_pipeline_t *sw = rmt_create();
+    if (!sw) { fprintf(stderr, "nc_demo: rmt_create failed\n"); g_fails++; return; }
     if (p4c_compile_file(sw, "p4/enc_classify.p4") < 0 ||
         rmt_load_entries(sw, "entries/enc_classify.txt") < 0) {
         fprintf(stderr, "  FATAL: cannot set up pipeline\n");

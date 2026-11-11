@@ -142,11 +142,13 @@ action nop() {
 }
 
 /* ------------------------- tables -------------------------- */
-/* stage 0: direction from the ingress link */
+/* stage 0: direction from the ingress link
+ * Only ports 1 (uplink) and 2 (LAN) are monitored. Unknown ports
+ * are dropped to prevent mis-classification as inbound (dir=0). */
 table dir_t {
     key     { meta.ingress_port : exact; }
-    actions { set_dir; nop; }
-    default_action nop();
+    actions { set_dir; drop_pkt; }
+    default_action drop_pkt();
 }
 
 /* stages 1-4: utilization inference + probe, per family */
@@ -174,7 +176,10 @@ table probe6_t {
     default_action nop();
 }
 
-/* stage 5: capture decision, coupled with the inference above */
+/* stage 5: capture decision, coupled with the inference above.
+ * Control plane should install entries for all 8 (dir,scoped,used) combos.
+ * Default action is drop_pkt to avoid silent misdelivery on unmatched
+ * combinations. */
 table decide_t {
     key     { meta.dir : exact; meta.scoped : exact; meta.used : exact; }
     actions { capture; fwd; drop_pkt; }

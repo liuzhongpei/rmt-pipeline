@@ -7,8 +7,8 @@
  *                        (copy parsed eth/ipv4 into inner slots, build
  *                        outer IPv4/UDP/VXLAN around them). Skipped
  *                        for decapped packets (outer ipv4 invalidated).
- *   stage 2  l2          gate valid(ieth):  inner MAC -> egress port
- *                        (overlay bridging after decap)
+ *   stage 2  l2          gate valid(decap_mark): inner MAC -> egress port
+ *                        (overlay bridging after decap ONLY)
  *   stage 3  underlay    gate valid(ipv4):  underlay route for the
  *                        encapsulated packet -> port + outer MACs
  *
@@ -16,6 +16,11 @@
  * 15 inner-header field copies plus the first batch of outer-header
  * rewrites execute in one parallel word (read-before-write semantics
  * let the copies observe the pre-rewrite values).
+ *
+ * decap_mark is a marker header added only by vxlan_decap to distinguish
+ * decapsulated packets from encapsulated ones. Only decapsulated packets
+ * go through L2 bridging (stage 2); encapsulated packets skip it and go
+ * directly to underlay routing (stage 3).
  */
 
 header eth {
@@ -75,6 +80,11 @@ header iipv4 {
     dst     : 32;
 }
 
+/* marker header: only added by vxlan_decap to distinguish decap path */
+header decap_mark {
+    tag : 8;    /* always 0xDE */
+}
+
 metadata meta {
     egress_port : 16;
     drop        : 8;
@@ -129,6 +139,8 @@ action vxlan_decap() {
     remove_header(ipv4);
     remove_header(udp);
     remove_header(vxlan);
+    add_header(decap_mark);
+    set(decap_mark.tag, 0xDE);
 }
 
 /* Build outer IPv4/UDP/VXLAN around the parsed tenant frame.
@@ -163,6 +175,7 @@ action vxlan_encap(vni, sip, dip) {
 
     /* outer IPv4 (reuses the parsed slot): len = tenant len + 50 */
     add(ipv4.len, 50);
+    set(ipv4.ihl,   5);       /* outer: standard 20-byte header */
     set(ipv4.src,   sip);
     set(ipv4.dst,   dip);
     set(ipv4.ttl,   64);
@@ -181,6 +194,7 @@ action vxlan_encap(vni, sip, dip) {
 
 action set_port(port) {
     set(meta.egress_port, port);
+    remove_header(decap_mark);    /* cleanup marker before egress */
 }
 
 action route_underlay(port, dmac, smac) {
@@ -196,11 +210,15 @@ action drop_pkt() {
 action nop() {
 }
 
+action cleanup_decap_mark() {
+    remove_header(decap_mark);
+}
+
 /* ------------------------- tables -------------------------- */
 table vxlan_term {
     key     { vxlan.vni : exact; }
     actions { vxlan_decap; drop_pkt; nop; }
-    default_action nop();
+    default_action drop_pkt();   /* unknown VNI: drop (prevents double-encap) */
 }
 
 table tenant {
@@ -211,8 +229,8 @@ table tenant {
 
 table l2 {
     key     { ieth.dmac : exact; }
-    actions { set_port; nop; }
-    default_action nop();
+    actions { set_port; cleanup_decap_mark; }
+    default_action cleanup_decap_mark();
 }
 
 table underlay {
@@ -229,8 +247,8 @@ control ingress {
     if (valid(ipv4)) {
         apply(tenant);          /* stage 1 */
     }
-    if (valid(ieth)) {
-        apply(l2);              /* stage 2 */
+    if (valid(decap_mark)) {
+        apply(l2);              /* stage 2: only for decapsulated packets */
     }
     if (valid(ipv4)) {
         apply(underlay);        /* stage 3 */

@@ -50,6 +50,9 @@
 #define RMT_MAX_PARAMS   8      /* action data words per entry         */
 #define RMT_MAX_CACHES   4      /* stateful cache externs per pipeline */
 #define RMT_MAX_DNNS     2      /* neural inference externs per pipeline */
+#define RMT_MAX_SKETCHES 4      /* sketch externs per pipeline */
+#define RMT_SKETCH_MAX_D 8      /* max hash functions (depth) per sketch */
+#define RMT_SKETCH_MAX_W 4096   /* max counters per row (width) per sketch */
 #define RMT_DNN_MAX_IN   8      /* input features                      */
 #define RMT_DNN_MAX_HID  32     /* hidden neurons                      */
 #define RMT_DNN_MAX_OUT  4      /* output classes                      */
@@ -75,6 +78,15 @@ typedef struct {
     fv_t     fields[RMT_MAX_FIELDS];
     uint64_t hvalid;                    /* bit h = header h valid      */
 
+    /* action write-tracking for the in-place deparse fast path:
+     * dirty[] marks every field an action committed; structural is
+     * raised when a header's validity changed (add/remove), an inject
+     * replaced the payload, or the parser extracted headers out of
+     * declaration order -- all of which reshape the packet and
+     * therefore force the full deparse.                              */
+    uint64_t dirty[(RMT_MAX_FIELDS + 63) / 64];
+    bool     structural;
+
     /* packet-side context for stateful externs (in-network cache):
      * pl/pl_len expose the input payload (e.g. NDN Data content) to
      * cs_insert; a cs_lookup hit fills inject[] and the deparser
@@ -93,15 +105,25 @@ typedef struct {
 /* inline helpers for the bitmap-based hvalid                          */
 static inline bool phv_hdr_valid(const phv_t *phv, int h)
 {
+    if (RMT_UNLIKELY(h < 0 || h >= 64)) return false;
     return (phv->hvalid >> h) & 1;
 }
 static inline void phv_hdr_set(phv_t *phv, int h)
 {
+    if (RMT_UNLIKELY(h < 0 || h >= 64)) return;
     phv->hvalid |= (1ULL << h);
 }
 static inline void phv_hdr_clr(phv_t *phv, int h)
 {
+    if (RMT_UNLIKELY(h < 0 || h >= 64)) return;
     phv->hvalid &= ~(1ULL << h);
+}
+
+/* mark a field as modified by an action (in-place deparse tracking) */
+static inline void phv_field_dirty(phv_t *phv, int fd)
+{
+    if (RMT_UNLIKELY(fd < 0 || fd >= RMT_MAX_FIELDS)) return;
+    phv->dirty[fd >> 6] |= (1ULL << (fd & 63));
 }
 
 /* ------------------------------------------------------------------ */
@@ -185,6 +207,12 @@ typedef enum {
     OP_UTIL_PROBE,                     /* live hit: fd(used)=1;       */
                                        /*   miss/expired: no write    */
 
+    /* Count-Min Sketch extern (imm = sketch id). Flow-key fields are
+     * bound at sketch declaration; the extern hashes the key d times
+     * and atomically increments d counters (one per row).             */
+    OP_SKETCH_INC,                     /* atomic ++ on d counters     */
+    OP_SKETCH_GET,                     /* fd = min of d counters      */
+
     /* neural inference extern (imm = dnn id): gather the feature
      * fields bound at declaration, run the quantized MLP, write the
      * argmax class to fd. Used for anomaly traffic detection.       */
@@ -221,6 +249,13 @@ typedef struct trie_node {
     struct trie_node *b[2];
     struct trie_node *next_root;       /* next key field's tree       */
     struct rmt_entry *entry;           /* entries (last key field)    */
+    /* Path-compressed (radix) edge label: the run of key bits on the
+     * edge from this node's parent down to this node, stored MSB-first
+     * starting at label[0] bit 7. The root's label is empty (len 0).
+     * Compression collapses single-child chains, so a lookup visits only
+     * branching/attachment nodes instead of one node per key bit.      */
+    uint8_t  label[16];
+    uint16_t label_len;                /* number of bits in label      */
 } trie_node_t;
 
 typedef struct rmt_entry {
@@ -240,6 +275,9 @@ typedef struct {
     int action_ids[RMT_MAX_ACTIONS];
     int nactions;
     trie_node_t *root;
+    void *arena;                       /* match.c node arena: pool of  */
+                                       /* trie nodes, cache-friendly;  */
+                                       /* freed by rmt_table_free()    */
     int      default_action;           /* -1: no-op on miss           */
     uint64_t def_params[RMT_MAX_PARAMS];
     int      stage;                    /* physical stage assignment   */
@@ -267,6 +305,37 @@ typedef struct rmt_cache rmt_cache_t;
 /* rmt_dnn_load(), which quantizes the weights.                       */
 /* ------------------------------------------------------------------ */
 typedef struct rmt_dnn rmt_dnn_t;
+
+/* ------------------------------------------------------------------ */
+/* Count-Min Sketch (extern)                                          */
+/* A probabilistic counter array for flow frequency estimation.       */
+/* Declared in P4 with its flow-key fields bound:                     */
+/*     sketch flow_freq(4, 1024, ipv4.src, ipv4.dst);                 */
+/* and invoked from an action:  sketch_inc(flow_freq);                */
+/* or with a destination:       sketch_get(flow_freq, meta.freq_est); */
+/* The sketch maintains d × w atomic counters; update hashes the key  */
+/* d times (one per row) and increments each counter; query returns   */
+/* the minimum of the d counter values (standard CMS estimator).      */
+/* ------------------------------------------------------------------ */
+typedef struct rmt_sketch {
+    char     name[RMT_NAME_LEN];
+    int      d;                       /* depth (rows / hash functions)  */
+    int      w;                       /* width (counters per row)       */
+    int      key_fids[RMT_DNN_MAX_IN];/* flow-key field IDs (bound)     */
+    int      nkeys;                   /* number of flow-key fields      */
+    uint32_t *counters;               /* d × w plain counters (atomic)  */
+    _Atomic uint64_t updates;         /* diagnostic: total updates      */
+    _Atomic uint64_t queries;         /* diagnostic: total queries      */
+} RMT_ALIGNED(64) rmt_sketch_t;
+
+rmt_sketch_t *rmt_sketch_create(const char *name, int d, int w,
+                                 int nkeys, const int *key_fids);
+void rmt_sketch_destroy(rmt_sketch_t *s);
+void rmt_sketch_inc(rmt_sketch_t *s, const phv_t *phv);
+uint32_t rmt_sketch_get(rmt_sketch_t *s, const phv_t *phv);
+void rmt_sketch_reset(rmt_sketch_t *s);
+const char *rmt_sketch_name(const rmt_sketch_t *s);
+void rmt_sketch_print_stats(const rmt_sketch_t *s);
 
 /* ------------------------------------------------------------------ */
 /* Pipeline                                                           */
@@ -301,6 +370,8 @@ typedef struct {
     int          ncaches;
     rmt_dnn_t   *dnns[RMT_MAX_DNNS];      /* DNN inference externs    */
     int          ndnns;
+    rmt_sketch_t *sketches[RMT_MAX_SKETCHES]; /* CMS frequency sketch externs */
+    int           nsketches;
     bool verbose;
 } rmt_pipeline_t;
 
@@ -431,6 +502,8 @@ int  rmt_parse(const rmt_pipeline_t *p, const uint8_t *pkt, int len,
                phv_t *phv, int *hdr_bytes);
 int  rmt_deparse(const rmt_pipeline_t *p, const phv_t *phv,
                  uint8_t *out, int cap);
+/* write nbits of field value into pkt at bit offset (in-place patch) */
+void rmt_field_write(uint8_t *pkt, int bitoff, const fv_t *in, int nbits);
 
 /* ---------------- match.c ---------------- */
 rmt_entry_t *rmt_table_insert(rmt_pipeline_t *p, rmt_table_t *t,
@@ -466,7 +539,7 @@ uint64_t rmt_cache_tick(rmt_cache_t *c);      /* epoch++, returns new */
 void     rmt_cache_mark(rmt_cache_t *c, const fv_t *key);
 bool     rmt_cache_probe(rmt_cache_t *c, const fv_t *key);
 int      rmt_cache_live(rmt_cache_t *c);      /* non-expired entries  */
-void rmt_cache_print_stats(const rmt_cache_t *c);
+void     rmt_cache_print_stats(rmt_cache_t *c);
 
 /* ---------------- dnn.c ---------------- */
 rmt_dnn_t  *rmt_dnn_create(const char *name, int nin, const int *in_fids);

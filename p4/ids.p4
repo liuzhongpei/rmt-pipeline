@@ -15,10 +15,11 @@
  * quantized and installed with rmt_dnn_load(). No signature/entry
  * describes an attack: the verdict comes only from the network.
  *
- * 3 stages:
- *   stage 0  ids_t      TCP -> dnn_infer -> meta.class
- *   stage 1  verdict_t  class 1 -> drop (quarantine)
- *   stage 2  route      IPv4 LPM -> egress port
+ * 4 stages:
+ *   stage 0  ids_t        TCP -> dnn_infer -> meta.class
+ *   stage 1  verdict_t    class 1 -> drop (quarantine)
+ *   stage 2  ttl_check    hop_limit=0 -> drop (RFC 1812)
+ *   stage 3  route        IPv4 LPM -> egress port
  */
 
 /* ------------------------- headers ------------------------- */
@@ -102,6 +103,13 @@ action forward(port) {
     sub(ipv4.ttl, 1);
 }
 
+/* RFC 1812 §5.2.2: packets with TTL=0 must be discarded.
+ * This table is applied before route to catch TTL=0 before
+ * the decrement (which would underflow to 255).              */
+action ttl_expired() {
+    set(meta.drop, 1);
+}
+
 action drop_pkt() {
     set(meta.drop, 1);
 }
@@ -124,7 +132,14 @@ table verdict_t {
     default_action nop();
 }
 
-/* stage 2: normal L3 forwarding */
+/* stage 2: TTL expiry check (RFC 1812: drop TTL=0 before decrement) */
+table ttl_check {
+    key     { ipv4.ttl : exact; }
+    actions { ttl_expired; nop; }
+    default_action nop();
+}
+
+/* stage 3: normal L3 forwarding */
 table route {
     key     { ipv4.dst : lpm; }
     actions { forward; drop_pkt; }
@@ -140,6 +155,9 @@ control ingress {
         apply(verdict_t);      /* stage 1 */
     }
     if (valid(ipv4)) {
-        apply(route);          /* stage 2 */
+        apply(ttl_check);      /* stage 2: drop TTL=0 */
+    }
+    if (valid(ipv4)) {
+        apply(route);          /* stage 3 */
     }
 }

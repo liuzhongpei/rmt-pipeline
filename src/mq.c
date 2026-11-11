@@ -91,7 +91,7 @@ typedef struct {
     pthread_t        tid;
     int              id;
     rmt_pkt_t       *out;                 /* RMT_BATCH_MAX results   */
-    uint64_t         submitted;           /* dispatcher-side only    */
+    uint64_t         submitted;           /* dispatcher-side only (single writer, no atomics needed) */
     _Atomic uint64_t processed;           /* worker-side, for flush  */
     uint64_t         dropped;
 } RMT_ALIGNED(64) mq_worker_t;
@@ -195,8 +195,12 @@ rmt_mq_t *rmt_mq_create(rmt_pipeline_t *p, int nworkers, int ring_order,
         w->id = i;
         w->ring.mask = slots - 1;
         w->ring.slot = calloc(slots, sizeof(rmt_pkt_t *));
+        if (!w->ring.slot) {
+            rmt_mq_destroy(mq);
+            return NULL;
+        }
         w->out = calloc(RMT_BATCH_MAX, sizeof(rmt_pkt_t));
-        if (!w->ring.slot || !w->out) {
+        if (!w->out) {
             rmt_mq_destroy(mq);
             return NULL;
         }
@@ -223,6 +227,12 @@ int rmt_mq_start(rmt_mq_t *mq)
  * queue is full -- packets of one flow are never reordered.         */
 bool rmt_mq_submit(rmt_mq_t *mq, rmt_pkt_t *pkt, uint32_t hash)
 {
+    if (RMT_UNLIKELY(!mq || !pkt))
+        return false;
+    /* check running BEFORE attempting to push to avoid race during shutdown */
+    if (!atomic_load_explicit(&mq->running, memory_order_acquire))
+        return false;
+
     mq_worker_t *w = &mq->w[hash % (uint32_t)mq->nworkers];
     int spins = 0;
     while (!ring_push(&w->ring, pkt)) {

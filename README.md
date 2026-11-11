@@ -87,10 +87,11 @@ run-to-completion 模型）。
         │ │  Parser   │        │ M ─► A │ │ M ─► A │ │ M ─► A │ │ M ─► A ││       │          │   bytes
         │ └──────────┘         └────────┘ └────────┘ └────────┘ └────────┘│       └──────────┘
         │   解析图 FSM               │            │                        │        按头有效位
-        │   bit 级提取         ┌─────┴─────┐ ┌────┴──────┐                 │        重新串接
-        │   头栈 extract_array │ cache 引擎 │ │ dnn 引擎  │  (extern, 数据面 │        + 追加 payload
-        │                     │ CS / PIT  │ │ Q16 MLP   │   可读写有状态)   │        (或 cache 注入内容)
-        └─────────────────────┴───────────┴─┴───────────┴─────────────────┘
+        │   bit 级提取         ┌─────┴─────┐ ┌────┴──────┐ ┌───────────┐ │        重新串接
+        │   头栈 extract_array │ cache 引擎 │ │ dnn 引擎  │ │sketch 引擎│ │        + 追加 payload
+        │                     │ CS / PIT  │ │ Q16 MLP   │ │CMS 频率统计│ │        (或 cache 注入内容)
+        │                     │ util aging│ │ 前向推理  │ │(d=4,w=1024)│ │
+        └─────────────────────┴───────────┴─┴───────────┴─┴───────────┴─┘
                                     ▲                        ▲
                        ┌────────────┴─────────┐   ┌──────────┴──────────┐
                        │  P4 编译器 (p4c.c)    │   │ 控制面 (runtime.c)   │
@@ -144,7 +145,7 @@ run-to-completion 模型）。
 | `RMT_MAX_WORDS` | 8 | 每个 action 最多 VLIW word 数 |
 | `RMT_MAX_KEYS` | 8 | 每表最多 key 字段（覆盖 5 元组）|
 | `RMT_MAX_FIELDS` / `RMT_MAX_HDRS` | 160 / 40 | PHV 字段 / 头实例上限 |
-| `RMT_MAX_CACHES` / `RMT_MAX_DNNS` | 4 / 2 | 每流水线 cache / dnn extern 数 |
+| `RMT_MAX_CACHES` / `RMT_MAX_DNNS` / `RMT_MAX_SKETCHES` | 4 / 2 / 4 | 每流水线 cache / dnn / sketch extern 数 |
 
 ### 1.3 多队列并行引擎 (mq.c)
 
@@ -183,19 +184,25 @@ rmt-pipeline/
 │   ├── alu.c             16-ALU VLIW 执行器 (读旧写新语义 + extern 指令)
 │   ├── cache.c           in-network cache 引擎 (CS/PIT, 数据面可写)
 │   ├── dnn.c             DNN 推理引擎 (Q16.16 定点 MLP)
+│   ├── sketch.c          Count-Min Sketch 外原 (流频率统计)
 │   ├── pipeline.c        流水线编排: parse → stages → deparse
 │   ├── mq.c              多队列并行引擎 (RSS 分发 + SPSC 无锁环 + 绑核 worker)
 │   ├── p4c.c             P4 编译器 (词法/语法/代码生成/VLIW 调度)
 │   ├── runtime.c         控制面: 表项文件解析与下发
 │   ├── main.c            独立 SRv6 演示 (bin/rmt_demo)
-│   ├── tests.c           三套端到端测试 + 批量/并发/多队列测试 (bin/rmt_tests)
+│   ├── tests.c           多套端到端测试 + 批量/并发/多队列测试 (bin/rmt_tests)
 │   ├── int_demo.c        INT 带内遥测 demo (bin/int_demo)
-│   ├── ndn_demo.c        NDN 缓存 demo (bin/ndn_demo)
+│   ├── ndn_demo.c        NDN 缓存 demo (bin/ndn_demo, 11 测试含 hop/nonce/NACK)
 │   ├── ids_demo.c        DNN 异常检测 demo (bin/ids_demo)
 │   ├── telescope_demo.c  动态网络望远镜 demo (bin/telescope_demo)
 │   ├── enc_classify_demo.c  MLP 加密流量分类 demo (bin/enc_classify_demo)
-│   └── test_match.c     match 表单元测试 (bin/test_match)
-├── p4/                   示例 P4 程序 (mpls/vxlan/srv6/int/ndn/ids/telescope/enc_classify)
+│   ├── nc_demo.c         网络编码 demo (bin/nc_demo)
+│   ├── sketch_demo_driver.c  Sketch 频率统计 demo (bin/sketch_demo_driver)
+│   ├── test_match.c     match 表单元测试 (bin/test_match)
+│   ├── test_alu.c       PHV / ALU 指令单元测试 (bin/test_alu)
+│   ├── test_parser.c    解析器单元测试 (bin/test_parser)
+│   └── test_sketch.c    Sketch 外原单元测试 (bin/test_sketch, 28 checks)
+├── p4/                   示例 P4 程序 (mpls/vxlan/srv6/int/ndn/ids/telescope/enc_classify/sketch_demo)
 ├── entries/              对应的控制面表项文件
 ├── Makefile
 └── run.sh                一键构建/测试脚本
@@ -273,34 +280,46 @@ fv_t: v[16] = 128-bit 大端整数, 右对齐; bitlen = 字段位宽
   在查表之前判定，头无效则整表跳过 —— 这是方向/角色分离的关键机制
   （VXLAN 两个方向、NDN Interest/Data 共用一条流水线）。
 
-### 3.2 数据结构：级联二叉 bit-trie
+### 3.2 数据结构：级联 radix（路径压缩）trie
 
 ```
       key0 的 trie (如 ipv6.src)          key1 的 trie (如 ipv6.dst)
             root ────────────────────┐
            /    \                    │
-          0      1                   ▼
+      [0110…]  [10…]  (边=压缩 label)  ▼
          / \      \  next_root →   root ─ ... ─→  keyN 的 trie
         ...  ●(prefix end)                          叶: entry 链表
 ```
 
-节点 `trie_node_t { b[0], b[1], next_root, entry }`：
-- `b[0]/b[1]`：按 key 值的下一 bit 走向子节点；
+每个 key 字段是一棵 **radix / Patricia trie**：边不再是单个 bit，而
+是一段被压缩的 key 位串（`label`），只有分支点和前缀终点才有节点。
+这样 /128 IPv6 LPM 只需访问少数几个节点，而不是 128 层逐 bit 指针链
+（消除串行依赖访存，是 match 热点的主要优化）。
+
+节点 `trie_node_t { b[0], b[1], next_root, entry, label[16], label_len }`：
+- `label/label_len`：从父节点到本节点的边的压缩位串（MSB 优先）；
+  根节点 label 为空；
+- `b[0]/b[1]`：按 label 之后的下一 key bit 走向子节点；
 - `next_root`：本字段前缀在此结束，进入**下一个 key 字段**的树根；
 - `entry`：最后一个字段的前缀终点，挂表项链表（同 key 先插入者优先）。
+
+节点从每表的 **arena 块**顺序分配（而非逐个 `calloc`），插入路径在内存
+中连续，查找沿同一路径流式访问、预取友好。
 
 ### 3.3 插入 (rmt_table_insert)
 
 对每个 key 字段：取表项的前缀长 `plen`（exact 强制 = 字段宽），沿
-key 值高位起逐 bit 走/建节点共 `plen` 层；非最后字段则经 `next_root`
-切换到下一字段的树；最后字段处把 `entry{action_id, params}` 挂到
-终点节点。
+key 值高位下行，沿途比对各节点 `label`；若新前缀在某节点 label 中途
+分叉或终止，则**分裂**该节点（抽出公共前缀成中间节点，原子节点降为
+其子节点）；非最后字段经 `next_root` 切换到下一字段的树；最后字段处
+把 `entry{action_id, params}` 挂到终点节点。分裂保证插入顺序无关。
 
 ### 3.4 查找 (rmt_table_lookup)：最长前缀优先回溯
 
 ```
 trie_walk(root, kidx):
-  沿 PHV 中该字段值的 bit 序列从 root 下走, 记录路径上所有
+  沿 PHV 中该字段值的 bit 序列从 root 下走, 逐节点比对其 label
+  与 key 的公共前缀(移位+XOR+clz 一次比完), 记录路径上所有
   "可行点" (挂有 next_root 或 entry 的节点) 到 cand[]
   从最深的可行点开始回溯:
      - 最后一个字段: 直接返回 entry  (最深 = 最长前缀)
@@ -311,8 +330,9 @@ trie_walk(root, kidx):
 - 单字段即标准 LPM；多字段时语义为**字典序的最长前缀优先**
   （前面字段的更长前缀优先于后面字段）；
 - exact 字段只有"全宽命中"一个可行点，天然退化为哈希表语义；
-- 复杂度：O(∑ 字段位宽)，与表项数无关（对应硬件 TCAM/SRAM 的
-  确定性查找延迟）。
+- 复杂度：访问的节点数 = 路径上的分支/前缀终点数（路径压缩后远小于
+  字段位宽）；label 比对为 O(label 长) 的移位/clz 常数操作。仍与表项
+  总数无关（对应硬件 TCAM/SRAM 的确定性查找延迟）。
 
 ### 3.5 Match 结果
 
@@ -410,7 +430,7 @@ w2: 2 槽       addi udp.len (RAW 依赖 w1 的 mov udp.len) 等
  │ punct/   │            │   hdr_def_t / field_def_t / arr_def_t     │
  │ 注释跳过  │            │   (头栈 h[N] 展开为 N 个实例 h[0..N-1])    │
  └──────────┘            │                                           │
-                         │ cache/dnn 声明 ──► extern 实例 + 字段绑定   │
+                         │ cache/dnn/sketch 声明 ──► extern 实例 + 字段绑定│
                          │                                           │
                          │ parser 块 ──────► 解析图 parse_state_t     │
                          │   extract / extract_array / select / goto │
@@ -441,6 +461,7 @@ metadata meta { ... }                // 元数据, 不参与逆解析
 
 cache cs(64);                        // in-network cache extern
 dnn net(h.f1, h.f2);                 // DNN extern, 绑定特征字段
+sketch freq(4, 1024, h.f1, h.f2);    // CMS sketch extern, 绑定流键字段
 
 parser st {
     extract(h);                      // 也支持 extract(stk[0])
@@ -456,6 +477,8 @@ action a(p1, p2) {                   // 参数 = 表项 action data
     add_header(h);   remove_header(stk[0]);
     cs_lookup(cs, h.f1);  pit_consume(pit, h.f1);
     dnn_infer(net, meta.class);
+    sketch_inc(freq);                     // 递增 d 个计数器 (CMS update)
+    sketch_get(freq, meta.freq_est);      // 读取 min 估计值写入字段
 }
 
 table t {
@@ -487,10 +510,11 @@ control ingress {
 
 | stage | 表 | 门控 | Match key (选项) | 动作 | 本级功能 |
 |---|---|---|---|---|---|
-| 0 | `local_sid` | `valid(srh)` | `ipv6.dst : lpm` | `srv6_end` / nop | "My SID" 判定：命中本机 SID 则执行 End 行为 |
-| 1 | `route` | — | `ipv6.dst : lpm` | `forward(port)` / drop | 对**新 dst** 做 IPv6 路由，得出端口 |
-| 2 | `acl` | `valid(udp)` | `ipv6.src : lpm`<br>`ipv6.dst : lpm`<br>`ipv6.next_hdr : exact`<br>`udp.sport : exact`<br>`udp.dport : exact` | permit / deny | **5 元组分类**（五棵 trie 级联匹配）|
-| 3 | `mac_rewrite` | — | `meta.egress_port : exact` | `set_macs` | 出端口 → 下一跳 MAC 改写 |
+| 0 | `sl_check` | `valid(srh)` | `srh.segments_left : exact` | `sl_exhausted` / nop | SL=0 丢弃（防 SRH 下溢至 255，OOB 访问 seg[]）|
+| 1 | `local_sid` | `valid(srh)` | `ipv6.dst : lpm` | `srv6_end` / nop | "My SID" 判定：命中本机 SID 则执行 End 行为 |
+| 2 | `route` | — | `ipv6.dst : lpm` | `forward(port)` / drop | 对**新 dst** 做 IPv6 路由，得出端口 |
+| 3 | `acl` | `valid(udp)` | `ipv6.src : lpm`<br>`ipv6.dst : lpm`<br>`ipv6.next_hdr : exact`<br>`udp.sport : exact`<br>`udp.dport : exact` | permit / deny | **5 元组分类**（五棵 trie 级联匹配）|
+| 4 | `mac_rewrite` | — | `meta.egress_port : exact` | `set_macs` | 出端口 → 下一跳 MAC 改写 |
 
 **报文逐级处理**
 
@@ -501,17 +525,19 @@ in:  eth │ ipv6(dst=SID1, hlim=64) │ srh(SL=2) │ seg[0..2] │ udp │ pay
          extract_array(seg, srh.last_entry+1)   ← 栈深度运行时决定
          → udp
       ▼
- stage0 local_sid: lpm(ipv6.dst) 命中 fd00::a1/128 → srv6_end
+ stage0 sl_check: exact(SL=2) 未命中 → nop（SL=0 则丢弃）
+      ▼
+ stage1 local_sid: lpm(ipv6.dst) 命中 fd00::a1/128 → srv6_end
          w0: │sub SL,1│sub hlim,1│          ← 2 ALU 并行 (无依赖)
          w1: │MOVX ipv6.dst = seg[SL].sid│  ← RAW 依赖 w0 的新 SL
       ▼
- stage1 route: lpm(新 dst=SID2) → forward(2): egress_port=2
+ stage2 route: lpm(新 dst=SID2) → forward(2): egress_port=2
       ▼
- stage2 acl: 5 棵 trie 依次匹配 (src,dst,proto,sport,dport)
-         命中 deny 规则 → meta.drop=1 → 流水线终止
-         否则 permit (default) → 继续
+ stage3 acl: 5 棵 trie 依次匹配 (src,dst,proto,sport,dport)
+         命中 permit 规则 → 继续
+         否则 deny (default) → meta.drop=1 → 流水线终止
       ▼
- stage3 mac_rewrite: exact(port=2) → set_macs(下一跳 MAC)
+ stage4 mac_rewrite: exact(port=2) → set_macs(下一跳 MAC)
       ▼
  deparse: 头字段回写 (seg 栈原样保留), payload 追加
 out: eth'│ ipv6(dst=SID2, hlim=63) │ srh(SL=1) │ seg │ udp │ payload
@@ -570,26 +596,44 @@ out: eth'│ ipv4(len+50) │ udp(4789) │ vxlan │ ieth │ iipv4 │ payload
 
 ### 6.3 NDN 命名数据网络 (`p4/ndn.p4`)
 
-按**内容名字**而非主机地址转发；两个 cache extern 是数据面可写的
-有状态存储：
+按**内容名字**而非主机地址转发；3 个 cache extern + 1 个 sketch extern
+提供数据面可写的有状态存储：
 
 ```
-cache cs(64);    Content Store : name → 内容字节   (在途缓存)
-cache pit(64);   Pending Interest Table : name → 入端口 (面包屑)
+cache cs(64);          Content Store : name → 内容字节   (在途缓存)
+cache pit(64);         Pending Interest Table : name → 入端口 (面包屑)
+cache nonce_seen(256); Nonce 循环检测 : 记录已转发的 nonce
+sketch name_freq(4, 256, ndn.name);  名字流行度统计 (CMS)
 ```
 
-**级映射总表**
+**8 阶段流水线**
 
 | stage | 表 | 门控 | Match key (选项) | 动作 | 本级功能 |
 |---|---|---|---|---|---|
-| 0 | `cs_t` | `valid(ndn)` | `ndn.pkt_type : exact` | `cs_check`(Interest) / `cs_store`(Data) | Interest 探缓存；Data 途经即缓存 |
-| 1 | `cs_hit_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact` | `cs_reply` / nop | 缓存命中的 Interest → 本地转为 Data 应答 |
-| 2 | `pit_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact` | `pit_add`(Interest) / `pit_serve`(Data) | Interest 留面包屑（重复→聚合丢弃）；Data 反向路径 |
-| 3 | `fib_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact`<br>`ndn.name : lpm` | `fwd(port)` / drop / nop | **名字 LPM 转发**：128 位名字（4×32 位分量），/32 匹配首分量 |
+| 0 | `hop_check_t` | `valid(ndn)` | `ndn.hop_limit : exact` | `hop_expired` / nop | hop_limit=0 丢弃（TTL 保护） |
+| 1 | `nonce_probe_t` | `valid(ndn)` | `ndn.pkt_type : exact` | `nonce_probe` / nop | Interest 探测 nonce_seen（→ meta.used）|
+| 2 | `nonce_check_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.used : exact` | `nonce_drop` / `nonce_record` / nop | (1,1) 丢弃循环；(1,0) 记录新 nonce |
+| 3 | `cs_t` | `valid(ndn)` | `ndn.pkt_type : exact` | `cs_check` + `sketch_inc` / `cs_store` | Interest 探缓存 + 统计流行度；Data 途经即缓存 |
+| 4 | `cs_hit_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact` | `cs_reply` / nop | 缓存命中的 Interest → 本地转为 Data 应答（3-mov MAC 交换）|
+| 5 | `pit_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact` | `pit_add` / `pit_serve` | Interest 留面包屑（重复→聚合丢弃）；Data 反向路径 |
+| 6 | `fib_t` | `valid(ndn)` | `ndn.pkt_type : exact`<br>`meta.cs_hit : exact`<br>`ndn.name : lpm` | `fwd(port)` / `make_nack` / nop | 名字 LPM 转发；FIB miss → 生成 NACK 返回消费者 |
+| 7 | `mac_rewrite` | — | `meta.egress_port : exact`<br>`meta.cs_hit : exact`<br>`meta.nack_gen : exact` | `set_macs` | (port, cs_hit=0, nack_gen=0) 时重写 MAC；CS reply 和 NACK 已自带交换后的 MAC |
+
+**NACK 机制**（FIB miss 时）：
+
+`make_nack` 动作将 Interest 转为 NACK（type=3），设置错误码（1=无路由），
+交换 MAC 地址，将 `meta.nack_gen=1` 以跳过 `mac_rewrite`（保留交换后的 MAC），
+发回请求者。消费者收到 NACK 可重试其他路径。
+
+**Nonce 循环检测**：
+
+每个 Interest 的 nonce 在 stage 1 被 `util_probe` 查询，若已见过（meta.used=1）
+则在 stage 2 被丢弃。新 nonce 由 `util_mark` 记录。Data/NACK 报文不参与
+nonce 追踪（节省 nonce_seen 缓存槽位）。
 
 动作没有分支能力，Interest/Data、命中/未命中的判断全部拆解为
-**级间靠 `meta.cs_hit` + `pkt_type` 做 match key** —— 这正是
-match-action 架构表达条件逻辑的标准方式。
+**级间靠 `meta.cs_hit` / `meta.used` / `meta.nack_gen` + `pkt_type` 做 match key**
+—— 这正是 match-action 架构表达条件逻辑的标准方式。
 
 **三种报文的逐级处理**
 
@@ -626,13 +670,14 @@ out: 本地生成的 Data 应答原路返回, 上游/生产者完全无感知
 "class=1 就隔离" 两条通用规则，SYN flood / Xmas scan / NULL scan
 的检出完全来自网络内的神经网络。
 
-**级映射总表**
+**4 阶段流水线**
 
 | stage | 表 | 门控 | Match key (选项) | 动作 | 本级功能 |
 |---|---|---|---|---|---|
 | 0 | `ids_t` | `valid(tcp)` | `ipv4.proto : exact` | `classify` / `nop` | TCP → `dnn_infer(ids, meta.class)` 写判决 |
 | 1 | `verdict_t` | `valid(tcp)` | `meta.class : exact` | `quarantine` / `nop` | class=1 → drop（隔离），class=0 → 放行 |
-| 2 | `route` | `valid(ipv4)` | `ipv4.dst : lpm` | `forward(port)` / `drop_pkt` | 幸存报文正常 L3 转发（ttl-1） |
+| 2 | `ttl_check` | `valid(ipv4)` | `ipv4.ttl : exact` | `ttl_expired` / nop | TTL=0 丢弃（RFC 1812） |
+| 3 | `route` | `valid(ipv4)` | `ipv4.dst : lpm` | `forward(port)` / `drop_pkt` | 幸存报文正常 L3 转发（ttl-1） |
 
 非 TCP 报文两级门控都不命中，直接落到 stage 2 纯转发——IDS 对
 无关流量零干扰。
@@ -781,10 +826,11 @@ voip / bulk），并联动 QoS DSCP 标记实现差异化服务。
 parser: eth → ipv4 → tcp → tls (dport=443 时解析 TLS 头 5 字节)
 
 stage 0: classify_t (tls.type == 23 触发 DNN，其他旁路)
-            └→ DNN extern 前向: 归一化 → 隐藏层 ReLU → argmax → meta.class
+            └→ DNN extern 前向: 归一化 → 隐藏层 ReLU (clamped to ±2^27 防溢出) → argmax → meta.class
 stage 1: qos_t    (meta.class → DSCP：0/32/46/10)
-stage 2: route    (ipv4.dst LPM → egress_port)
-stage 3: mac_rewrite (MAC 重写)
+stage 2: ttl_check (ipv4.ttl == 0 → drop，RFC 1812)
+stage 3: route    (ipv4.dst LPM → egress_port)
+stage 4: mac_rewrite (MAC 重写)
 ```
 
 **特征归一化**：`scales[4] = {1500, 65536, 16384, 256}`，各特征除以其
@@ -820,11 +866,42 @@ stage 3: mac_rewrite (MAC 重写)
 |---|---|---|
 | 0 | `classify_t` / `tls.type : exact` | 仅对 TLS application_data (type=23) 触发 DNN 推理，结果写 meta.class |
 | 1 | `qos_t` / `meta.class : exact` | 按类别打 DSCP：web=0, video=AF41, voip=EF, bulk=AF11 |
-| 2 | `route` / `ipv4.dst : lpm` | LPM 路由、定出端口 |
-| 3 | `mac_rewrite` / `meta.egress_port : exact` | MAC 改写 |
+| 2 | `ttl_check` / `ipv4.ttl : exact` | TTL=0 丢弃（RFC 1812） |
+| 3 | `route` / `ipv4.dst : lpm` | LPM 路由、定出端口 |
+| 4 | `mac_rewrite` / `meta.egress_port : exact` | MAC 改写 |
 
 DNN extern 绑定 4 个特征: `ipv4.len`、`tcp.window`、`tls.length`、`tls.type`。
-网络拓扑 4-24-4 (ReLU + argmax)，测试准确率 99%。
+网络拓扑 4-24-4 (ReLU + argmax)，测试准确率 99%。隐层激活值 clamped 至 ±2^27
+以防止输出层累加溢出。
+
+### 6.8 Sketch 流频率统计 (`p4/sketch_demo.p4`)
+
+**Sketch 外原**（`src/sketch.c`）提供 Count-Min Sketch 数据结构用于流频率估计：
+
+```
+sketch flow_freq(4, 1024, ipv4.src, ipv4.dst);
+// d=4 个独立 hash，w=1024 计数器/行，16 KB 内存
+// 误差 ε ≈ e/1024 ≈ 0.27%，93.75% 置信度
+```
+
+**5 阶段流水线**
+
+| stage | 表 / key | 功能 |
+|---|---|---|
+| 0 | `route` / `ipv4.dst : lpm` | LPM 路由定出端口（miss → drop）|
+| 1 | `sketch_inc_t` / `ipv4.proto : exact` | `sketch_inc(flow_freq)` 原子递增 4 个计数器 |
+| 2 | `sketch_get_t` / `ipv4.proto : exact` | `sketch_get(flow_freq, meta.freq_est)` 写 min 估计值 |
+| 3 | `classify_t` / `meta.freq_est : lpm` | 基于频率的重流分类 → `mark_heavy` / `mark_normal` |
+| 4 | `mac_rewrite` / `meta.egress_port : exact` | MAC 改写 |
+
+**使用场景**：
+- 流量监控：跟踪每个流的包频率，识别 heavy hitter
+- 缓存策略：流行度感知的缓存替换
+- 负载均衡：基于流频率的分配决策
+- DDoS 检测：识别高频流
+
+`sketch_inc` 和 `sketch_get` 是原子操作，多线程环境下可安全并发使用
+（`__ATOMIC_RELAXED` 原子增量）。Reset 需确保无并发访问。
 
 ---
 
@@ -863,13 +940,27 @@ DNN 模型的下发走 C API（demo 内训练→量化→`rmt_dnn_load()`），
 
 ## 8. 构建与测试脚本
 
-### 8.1 构建
+### 8.1 构建（Makefile 目标）
 
 ```bash
-make            # 全部二进制 (gcc -O3 -flto -Wall -Wextra -std=c11, 0 警告)
-make test       # 构建并运行 bin/rmt_tests
-make clean
+make            # 全部二进制 (gcc -O3 -flto -march=native -Wall -Wextra -std=c11, 0 警告)
+make clean      # 清理 build/ 与 bin/
 ```
+
+| 目标 | 作用 |
+|---|---|
+| `make` / `make all` | 构建全部 14 个二进制（8 数据面 demo + 测试程序 + sketch demo） |
+| `make test` | 构建并运行 `bin/rmt_tests`（全量功能/性能套件） |
+| `make run` | 运行独立 SRv6 demo（`bin/rmt_demo p4/srv6.p4 entries/srv6_entries.txt`） |
+| `make test-match` | 运行 match 运行时单元测试 `bin/test_match`（exact/LPM/多 key 回溯/radix 分裂） |
+| `make int` / `ndn` / `ids` / `telescope` / `enc-classify` / `nc` | 运行对应数据面 demo |
+| `make bench` | 性能快测：`bulk 50000` + `par 8` + `mq 4` + `tcpmq 8` |
+| `make pgo` | 两遍 PGO 构建（插桩→训练→按分支频率重编译，额外 +10~20%） |
+| `make debug` | `-O3 -g` 无 `-march=native` 的调试构建（便于 gdb/valgrind） |
+| `make pcap-test` | 构建真实 pcap 回放分类评测 `bin/pcap_test` |
+
+构建产物在 `bin/`（二进制）与 `build/`（`.o`）；二者及 `gmon.out`、`__pycache__/`
+等已列入 `.gitignore`，不入库。
 
 ### 8.2 run.sh 一键脚本
 
@@ -890,6 +981,8 @@ make clean
   ids / ids-v       DNN 异常流量检测 demo (训练→量化→在线检出)
   telescope / telescope-v   动态网络望远镜 demo (推断未用空间→捕获 IBR)
   enc / enc-v     MLP 加密流量分类 demo (TLS 4 类: web/video/voip/bulk)
+  nc         网络编码 demo (服务感知 FEC: 按类 RLNC/XOR + 编解码正确性)
+  bench-all  综合测试套件 (等价 scripts/bench_all.sh --full, T1–T7)
   demo       独立 SRv6 演示 (bin/rmt_demo)
   clean      清理
 ```
@@ -904,7 +997,7 @@ make clean
 | mpls | 流 A 嵌套 pop+pop+swap / 流 B 中转 swap | 7 + 6 |
 | vxlan | 解封装 (88→38B) / 封装 (42→92B, 外层逐字段) | 6 + 12 |
 | srv6 | End 行为 (dst/SL/hlim/port/MAC) / 5 元组 ACL 丢弃 | 7 + 1 |
-| bulk | N 个变化报文 (SL 交替, 源地址/端口/载荷逐包不同) | 逐包 7 项 |
+| bulk | N 个变化报文 (SL 交替, 源地址/载荷逐包不同; UDP 端口固定 5000/6000 以匹配 ACL exact 规则) | 逐包 7 项 |
 | par | T 线程并发打入同一条流水线 | 全部正确 + 加速比 |
 | mq | RSS 散列到 Q 条无锁环, 绑核 worker 回调内逐包校验 | 全部正确 + 队列均衡 + 加速比 |
 | tcpmq | 2048 条 TCP 流按 5 元组哈希分派 (ids.p4, 最大 128 队列) | 全部正确 + 同流同队列不变式 + 负载均衡 |
@@ -913,6 +1006,10 @@ make clean
 | ids | 浮点精度/量化一致性/逐类攻击检出/批量检出率与误报率 | 11 |
 | telescope | 未用捕获/激活保护/老化回收/复活/IPv6/批量扫描零误捕 | 14 |
 | enc_classify | 模型训练/量化一致性/逐类 QoS 标记/非 TLS 旁路/路由+MAC | 20 |
+
+另有独立单元测试 `make test-match`（`bin/test_match`）：单 key exact/LPM、
+多 key 级联、跨字段最长前缀回溯（README §3.4 语义回归）、radix 节点分裂与
+插入顺序无关性（IPv6 共享前缀），共 9 组。
 
 ### 8.4 详细轨迹 (-v)
 
@@ -933,6 +1030,37 @@ make clean
 
 `[aluK wN]` 表示该指令由第 N 个 VLIW word 的第 K 号 ALU 执行 ——
 可直接看到 16 ALU 的并行占用情况。
+
+### 8.5 基准/评测脚本（scripts/）
+
+面向论文评测的独立脚本，均自动先构建再运行：
+
+```bash
+bash scripts/bench_all.sh [--quick|--full|--report]
+#   --quick   CI 最小集 (T1 功能 + T2 分类精度)
+#   --full    完整套件 (默认)
+#   --report  同 --full，输出可解析格式便于生成论文表格
+#
+# 七类测试：
+#   T1 功能正确性 (全数据面 + 分类 + 网络编码)
+#   T2 分类精度   (逐类 / 总体 / 量化一致性)
+#   T3 单包时延   (单线程 / batch / 多队列)
+#   T4 多核扩展   (1/2/4/8/16 worker)
+#   T5 负载均衡   (RSS 分布分析)
+#   T6 网络编码   (逐类编码正确性 + GF(2^8) 代数)
+#   T7 路由+编码联合 (端到端时延)
+
+bash scripts/bench_real_traffic.sh [--packets N] [--report]
+#   用按公开流量统计生成的真实 TLS 流量 (scapy) 评测分类框架。
+#   默认 4000 包；输出逐类精度与 DSCP 标记核对。依赖 python3 + scapy。
+
+python3 scripts/gen_realistic_traffic.py
+#   bench_real_traffic.sh 的流量生成器 (可独立调用)：
+#   生成 /tmp/real_traffic_*.pcap 与对应 ground-truth 标签 csv。
+```
+
+`make bench` 是轻量性能快测（`bulk 50000` + `par 8` + `mq 4` + `tcpmq 8`），
+`./run.sh bench-all` 则调用 `bench_all.sh --full`。
 
 ---
 
@@ -991,6 +1119,22 @@ rmt_mq_flush(mq);                              /* 等全部处理完(含回调) 
 rmt_mq_stop(mq); rmt_mq_destroy(mq);
 ```
 
+**第四轮（match 结构重构 + 原位编辑，2026-08）**
+
+gprof 显示 `rmt_table_lookup` 的 trie 逐 bit 指针追逐占单包时间 ~80%（/128
+IPv6 LPM 最深 128 层串行依赖访存）。本轮直接重构查找结构并消除逆解析冗余：
+
+| 优化 | 位置 | 说明 |
+|---|---|---|
+| match 节点 arena 池分配 | `match.c` | 节点按表从 arena 块顺序分配（非逐个 `calloc`），插入路径内存连续、预取友好 |
+| **radix / 路径压缩 trie** | `match.c`+`rmt.h` | 边由单 bit 改为压缩 `label`，只有分支点/前缀终点才有节点；/128 LPM 只访问少数节点而非 128 层指针链（本轮最大杠杆） |
+| label 比对快路径 | `match.c` | 移位 + XOR + `clz` 一次比完整段 label，热路径无逐 bit 循环；插入侧节点**分裂**保证顺序无关 |
+| 原位编辑快路径 deparse | `pipeline.c`+`alu.c`+`parser.c` | PHV 增 `dirty[]` 位图 + `structural` 标志；无结构变更时整包一次 `memcpy`、仅原位补丁被 action 改写的字段，跳过逐字段 deparse 与 payload 二次拷贝（逐字节输出不变，VXLAN/NDN/INT 等结构变化自动回退） |
+| DNN 统计无锁化 | `dnn.c` | 每推理 `pthread_mutex` → C11 relaxed 原子，消除多核分类的跨核串行点 |
+
+效果：`field_candidates`（trie 指针追逐）从单包 ~80% 降至 **~0%**，瓶颈转移到
+ALU 动作执行与解析。**SRv6 bulk 单线程较本轮前 ~2.9x、batch ~3.2x**。
+
 SRv6 批量测试（126B 报文，VirtualBox 8 核环境，`make bench` 复测）：
 
 | 阶段 | 单线程 per-pkt | 批处理模式 | 多线程 |
@@ -999,6 +1143,10 @@ SRv6 批量测试（126B 报文，VirtualBox 8 核环境，`make bench` 复测�
 | 第一轮后 | ~2000 ns/pkt | ~1123 ns/pkt | 1.2x (VM 受限) |
 | 第二轮后 (PGO) | ~933 ns/pkt | ~911 ns/pkt (≈1.1 Gbps) | 2.0x (8 线程) |
 | 第三轮后 (8 队列 mq) | – | **~227 ns/pkt** | **4.6-5.2x, 2.6-4.4 Mpps (最高 ≈4.4 Gbps)** |
+| 第四轮后 (radix+原位) | **~400-550 ns/pkt**（最优 ~330） | **~330-400 ns/pkt**（最优 ~280） | mq8 ~4.2 Mpps / tcpmq8 ~10-16 Mpps |
+
+> 第四轮行为 `make all`（未叠 PGO）在本共享 VM 上多轮中位数；与第二/三轮（PGO）
+> 非同条件，横向对比以各自注明配置为准。叠加 `make pgo` 预计再 +10~20%。
 
 TCP 按流分派测试（ids.p4 数据面，54B TCP，2048 条流，400000 包，逐包校验 +
 “同流只落同队列”不变式断言）：
@@ -1012,9 +1160,37 @@ TCP 按流分派测试（ids.p4 数据面，54B TCP，2048 条流，400000 包�
 队列数是纯运行时参数（8/16/32/64/128 均可，上限 `MQ_MAX_WORKERS=128`）；
 8 核环境下 64/128 队列为超订阅验证正确性，吞吐收益需同等核数支撑。
 
-> 100 Gbps @ 126B ≈ 99 Mpps（≈10 ns/pkt），纯软件单线程无法达到。三轮优化
-> 将软件模型推至单线程 ~1.1 Mpps、8 队列最高 ~4.4 Mpps（VM 内与 IDE 共享 8 核，
-> 裸机独占核数更多时按队列数近线性扩展）；生产级 100 Gbps 需叠加：
+### 9.1 最新实验结果（2026-08，第四轮后）
+
+测试环境：VirtualBox 8 vCPU 虚拟机（与宿主共享核，噪声较大；多核扩展比值
+偶发失真，绝对吞吐可信），`make all`（`-O3 -flto -march=native`，未叠 PGO），
+全部功能测试逐字节校验通过（`rmt_tests` + 6 demo + `bench_all.sh`）。
+
+**性能（SRv6 bulk，126B）**
+
+| 指标 | 结果 |
+|---|---|
+| 单线程（多轮中位） | ~400–550 ns/pkt（最优 ~330），≈1.8–2.6 Mpps |
+| batch64（多轮中位） | ~330–400 ns/pkt（最优 ~280），≈2.5–3 Mpps |
+| mq ×8（126B） | ~237 ns/pkt，≈4.2 Mpps（≈4.3 Gbps） |
+| tcpmq ×8（54B，2048 流） | ~61–103 ns/pkt，≈9.7–16.4 Mpps，2.3–4.4x |
+| match 查找热点（gprof） | 由 ~80% 降至 **~0%**（radix 命中） |
+
+**分类 / 检测精度**
+
+| 任务 | 结果 |
+|---|---|
+| 加密流量分类（协议 B，5 seed） | 总体 **98.53% ± 0.39%**；逐类 recall web 99.0% / video 95.1% / voip 100% / bulk 100% |
+| 真实 TLS 流量（scapy 生成 3000 包） | 总体 **97.1%**；web 96.1% / video 92.4% / voip 100% / bulk 100% |
+| DNN-IDS（SYN flood 等，1000 包批量） | 检出率 **100%**（502/502），误报 **0%**（0/498） |
+| 网络编码开销（`bench_all.sh` T6） | 总冗余 12.3%（RLNC k=4 VoIP 25%、k=8 Video 12.5%、bulk 0%）；单包编码代价 < 5000 ns |
+
+复现命令：`make bench`（性能快测）、`bash scripts/bench_all.sh --full`（T1–T7）、
+`./bin/enc_classify_demo` / `./bin/ids_demo`、`bash scripts/bench_real_traffic.sh`。
+
+> 100 Gbps @ 126B ≈ 99 Mpps（≈10 ns/pkt），纯软件单线程无法达到。四轮优化
+> 将软件模型推至单线程 ~2–2.6 Mpps、8 队列最高 ~16 Mpps（54B 小包；VM 内与
+> IDE 共享核，裸机独占核数更多时按队列数近线性扩展）；生产级 100 Gbps 需叠加：
 > DPDK/AF_XDP 内核旁路零拷贝收发（本模型的 mq 分发/环/绑核结构可直接对接
 > NIC 硬件 RSS 多队列）、SIMD 化 PHV（AVX-512 一次处理 4 个 128-bit 字段）、
 > 以及最终落到 P4 可编程交换芯片（Tofino）或 SmartNIC 上执行——本模型的
@@ -1191,8 +1367,11 @@ run.sh 增加 `foo)` case，即可通过 `./run.sh foo` 一键构建并运行。
   外层 udp 槽（测试用 TCP 载荷规避）；
 - NDN：PIT 单端口（不做多端口复制）；未经请求的 Data 会先入 CS 再被
   PIT 丢弃（真实 NDN 同样存在该缓存污染面，需上层校验）；
-- DNN extern 输入特征须为动作执行前已就绪的字段（同 action 内仅对
-  首特征字段建立调度依赖）。
+- DNN / Sketch extern 的隐式操作数字段（特征 / 键字段）由声明绑定，
+  同一 action 内仅前两个字段参与编译期调度依赖，其余须在动作前就绪；
+- Sketch extern 计数器为 32-bit，高吞吐流可能回绕（建议周期性 reset）；
+  `sketch_reset` 非线程安全，调用时需确保无并发 `sketch_inc`/`sketch_get`；
+- Sketch 键字段总宽度限制 128-bit（单字段最大 128-bit）。
 
 ---
 

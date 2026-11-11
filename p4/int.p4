@@ -13,12 +13,17 @@
  * every switch:
  *   - INT source : watched flow (dst prefix + probe dport) and no INT
  *                  mark yet -> push shim + md[0], mark ipv4.tos=0x17
- *   - INT transit: INT mark present (tos == 0x17, count == 1 or 2)
+ *   - INT transit: INT mark present (tos == 0x17, count == 1, 2, or 3)
  *                  -> append md[count], count++
  * The parser only descends into the telemetry stack when the ipv4.tos
  * INT mark is set (a packet at the source hop has no stack yet).
  * meta.int_done keeps a switch from acting as source and transit for
  * the same packet. The collector (demo driver) decodes the stack.
+ *
+ * Supports up to 4 hops (1 source + 3 transit switches).
+ * Note: int_transit_t entries must be configured per switch to activate
+ * int_hop1/int_hop2/int_hop3 actions. Without entries, only source + 2
+ * transit hops work (default demo configuration).
  *
  * 4 stages:
  *   stage 0  route          IPv4 LPM -> egress port
@@ -161,6 +166,18 @@ action int_hop2(sw) {
     set(meta.int_done, 1);
 }
 
+action int_hop3(sw) {
+    add_header(int_md[3]);
+    set(int_md[3].switch_id, sw);
+    set(int_md[3].in_port, meta.ingress_port);
+    set(int_md[3].eg_port, meta.egress_port);
+    set(int_md[3].ts, meta.timestamp);
+    set(int_shim.count, 4);
+    add(ipv4.len, 12);
+    add(udp.len, 12);
+    set(meta.int_done, 1);
+}
+
 action set_macs(dmac, smac) {
     set(eth.dmac, dmac);
     set(eth.smac, smac);
@@ -194,7 +211,7 @@ table int_transit_t {
         int_shim.count : exact;
         meta.int_done : exact;
     }
-    actions { int_hop1; int_hop2; nop; }
+    actions { int_hop1; int_hop2; int_hop3; nop; }
     default_action nop();
 }
 

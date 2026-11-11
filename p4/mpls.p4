@@ -8,8 +8,9 @@
  *
  *   stage 0  mpls0        top label     : pop / swap+ttl-1
  *   stage 1  mpls1        2nd label     : pop / swap+ttl-1
- *   stage 2  mpls2        3rd label     : swap+ttl-1 -> egress port
- *   stage 3  mac_rewrite  egress port   : MAC rewrite
+ *   stage 2  mpls2        3rd label     : pop / swap+ttl-1
+ *   stage 3  mpls3        4th label     : swap+ttl-1 -> egress port
+ *   stage 4  mac_rewrite  egress port   : MAC rewrite
  *
  * Example flows (see entries/mpls_entries.txt):
  *   A: [100|200|300] -> pop 100, pop 200, swap 300->399  (nested x2)
@@ -109,9 +110,21 @@ action swap0(lbl, port) {
     set(meta.egress_port, port);
 }
 
+action swap1(lbl, port) {
+    set(mpls[1].label, lbl);
+    sub(mpls[1].ttl, 1);
+    set(meta.egress_port, port);
+}
+
 action swap2(lbl, port) {
     set(mpls[2].label, lbl);
     sub(mpls[2].ttl, 1);
+    set(meta.egress_port, port);
+}
+
+action swap3(lbl, port) {
+    set(mpls[3].label, lbl);
+    sub(mpls[3].ttl, 1);
     set(meta.egress_port, port);
 }
 
@@ -136,13 +149,19 @@ table mpls0 {
 
 table mpls1 {
     key     { mpls[1].label : exact; }
-    actions { pop1; nop; }
+    actions { pop1; swap1; nop; }
     default_action nop();
 }
 
 table mpls2 {
     key     { mpls[2].label : exact; }
     actions { swap2; nop; }
+    default_action nop();
+}
+
+table mpls3 {
+    key     { mpls[3].label : exact; }
+    actions { swap3; nop; }
     default_action nop();
 }
 
@@ -163,5 +182,8 @@ control ingress {
     if (valid(mpls[2])) {
         apply(mpls2);           /* stage 2: nested label  */
     }
-    apply(mac_rewrite);         /* stage 3                */
+    if (valid(mpls[3])) {
+        apply(mpls3);           /* stage 3: nested label  */
+    }
+    apply(mac_rewrite);         /* stage 4                */
 }

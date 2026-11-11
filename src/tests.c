@@ -93,6 +93,7 @@ static rmt_pipeline_t *load(const char *p4, const char *ent)
 {
     printf("\n================ %s ================\n", p4);
     rmt_pipeline_t *pipe = rmt_create();
+    if (!pipe) { fprintf(stderr, "rmt_create failed\n"); g_fails++; return NULL; }
     pipe->verbose = g_verbose;
     if (p4c_compile_file(pipe, p4) < 0 || rmt_load_entries(pipe, ent) < 0) {
         fprintf(stderr, "FATAL: cannot set up %s\n", p4);
@@ -331,10 +332,11 @@ static void test_srv6(void)
 /*
  * Every packet targets the local SID fd00::2 and carries the
  * 3-SID list [fd00::9, fd00::3, fd00::2].  Variation per packet:
- *   - IPv6 src low bytes  = packet index
+ *   - IPv6 src low bytes  = packet index (within the ACL fd00::/64)
  *   - segments_left       = 2 or 1 (alternating)  ->  after End the
  *     new dst is seg[1]=fd00::3 (port 2) or seg[0]=fd00::9 (port 3)
- *   - UDP sport/dport and 8-byte payload derived from the index
+ *   - UDP sport/dport fixed at the ACL-permitted 5000/6000 (exact
+ *     keys cannot be wildcarded); 8-byte payload derived from index
  * Each output packet is verified field by field.
  */
 static void build_srv6_pkt(rmt_pkt_t *in, int i)
@@ -358,8 +360,8 @@ static void build_srv6_pkt(rmt_pkt_t *in, int i)
     put_ip6(&b, "fd00::9");                      /* seg[0]         */
     put_ip6(&b, "fd00::3");                      /* seg[1]         */
     put_ip6(&b, "fd00::2");                      /* seg[2]         */
-    put16(&b, (uint16_t)(1024 + i));             /* udp sport      */
-    put16(&b, (uint16_t)(2048 + i));             /* udp dport      */
+    put16(&b, 5000);                             /* udp sport (ACL) */
+    put16(&b, 6000);                             /* udp dport (ACL) */
     put16(&b, 16); put16(&b, 0);
     for (int j = 0; j < 8; j++)                  /* payload        */
         put8(&b, (uint8_t)(i + j));

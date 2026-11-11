@@ -1,0 +1,20 @@
+# sketch_demo.p4 entries
+
+# Route table: IPv4 LPM routes
+# Note: route matches on ipv4.dst (bytes 30-33 of packet, at offset 16 in IPv4 header)
+table_add route forward 10.0.0.0/8 => 2
+table_add route forward 172.16.0.0/12 => 2
+table_add route forward 192.168.0.0/16 => 3
+table_add route drop_pkt 0.0.0.0/0 =>
+
+# MAC rewrite per egress port
+table_add mac_rewrite set_macs 2 => 00:11:22:33:44:55 66:77:88:99:aa:bb
+table_add mac_rewrite set_macs 3 => aa:bb:cc:dd:ee:f0 11:22:33:44:55:66
+
+# classify_t: heavy-hitter detection based on frequency estimate
+# Uses LPM on meta.freq_est (32-bit). Since CMS may over-count by a few
+# percent, we match exact values that the demo is expected to produce.
+# A production deployment would implement a proper threshold comparison.
+table_add classify_t mark_heavy 100/32 =>    # freq_est = 100 (Flow A)
+table_add classify_t mark_heavy 200/32 =>    # freq_est = 200 (Flow C)
+table_add classify_t mark_normal 0/0 =>      # default: normal

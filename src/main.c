@@ -120,6 +120,7 @@ int main(int argc, char **argv)
     const char *entries = (argc > 2) ? argv[2] : "entries/srv6_entries.txt";
 
     rmt_pipeline_t *pipe = rmt_create();
+    if (!pipe) { fprintf(stderr, "rmt_create failed\n"); return 1; }
     pipe->verbose = true;
 
     if (p4c_compile_file(pipe, p4file) < 0)

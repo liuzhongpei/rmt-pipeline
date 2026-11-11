@@ -558,16 +558,16 @@ The EdgeRMT prototype is implemented in approximately 6,000 lines of ISO C11 wit
 | Module | LOC | Functionality |
 |---|---|---|
 | `rmt.h` | 495 | Core data structures, PHV inline operations, public API |
-| `parser.c` | ~350 | Programmable parser FSM, deparser, header extraction |
-| `match.c` | ~160 | Cascaded bit-trie lookup engine (exact + LPM) |
-| `alu.c` | ~280 | 16-ALU VLIW executor with computed-goto dispatch |
-| `dnn.c` | ~200 | Q16.16 MLP forward pass, model loading, quantization |
-| `mq.c` | ~380 | Multi-queue engine (RSS, SPSC rings, core-pinned workers) |
-| `p4c.c` | ~1200 | P4 compiler (lexer, parser, AST, codegen, stage scheduler) |
-| `pipeline.c` | ~250 | Pipeline orchestration, batch/burst API |
+| `parser.c` | ~190 | Programmable parser FSM, deparser, header extraction |
+| `match.c` | ~370 | Cascaded bit-trie lookup engine (exact + LPM) with cross-field backtracking |
+| `alu.c` | ~400 | 16-ALU VLIW executor with computed-goto dispatch |
+| `dnn.c` | ~170 | Q16.16 MLP forward pass, model loading, quantization |
+| `mq.c` | ~400 | Multi-queue engine (RSS, SPSC rings, core-pinned workers) |
+| `p4c.c` | ~950 | P4 compiler (lexer, parser, AST, codegen, stage scheduler) |
+| `pipeline.c` | ~420 | Pipeline orchestration, batch/burst API |
 | `enc_classify_demo.c` | ~430 | Training, quantization, end-to-end verification |
 
-As shown in Table 4, the P4 compiler (`p4c.c`) is the largest module, reflecting the complexity of translating P4 source into pipeline configurations. The runtime data-plane modules (`parser.c` + `match.c` + `alu.c` + `dnn.c` + `pipeline.c`) total approximately 1,240 lines—a compact footprint suitable for resource-constrained edge deployments. The system compiles with GCC 7+ under `-O3 -flto -march=native` with zero warnings, and runs on Linux 4.x+ kernels. A Profile-Guided Optimization (PGO) two-pass build is available for additional performance optimization.
+As shown in Table 4, the P4 compiler (`p4c.c`) is the largest module, reflecting the complexity of translating P4 source into pipeline configurations. The runtime data-plane modules (`parser.c` + `match.c` + `alu.c` + `dnn.c` + `pipeline.c`) total approximately 1,550 lines—a compact footprint suitable for resource-constrained edge deployments. The system compiles with GCC 7+ under `-O3 -flto -march=native` with zero warnings, and runs on Linux 4.x+ kernels. A Profile-Guided Optimization (PGO) two-pass build is available for additional performance optimization.
 
 ### 5.2 Experimental Setup
 

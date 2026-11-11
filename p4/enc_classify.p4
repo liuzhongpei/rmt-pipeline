@@ -21,11 +21,12 @@
  * and installed with rmt_dnn_load(). Classification is entirely
  * based on statistical traffic patterns, not payload inspection.
  *
- * 4 stages:
+ * 5 stages:
  *   stage 0  classify_t    TLS app_data -> dnn_infer -> meta.class
  *   stage 1  qos_t         class -> set DSCP / priority marking
- *   stage 2  route         IPv4 LPM -> egress port
- *   stage 3  mac_rewrite   egress port -> next-hop MACs
+ *   stage 2  ttl_check     hop_limit=0 -> drop (RFC 1812)
+ *   stage 3  route         IPv4 LPM -> egress port
+ *   stage 4  mac_rewrite   egress port -> next-hop MACs
  */
 
 /* ------------------------- headers ------------------------- */
@@ -141,6 +142,11 @@ action forward(port) {
     sub(ipv4.ttl, 1);
 }
 
+/* RFC 1812 §5.2.2: drop TTL=0 packets before decrement */
+action ttl_expired() {
+    set(meta.drop, 1);
+}
+
 action drop_pkt() {
     set(meta.drop, 1);
 }
@@ -168,14 +174,21 @@ table qos_t {
     default_action nop();
 }
 
-/* stage 2: IPv4 LPM routing */
+/* stage 2: TTL expiry check (RFC 1812) */
+table ttl_check {
+    key     { ipv4.ttl : exact; }
+    actions { ttl_expired; nop; }
+    default_action nop();
+}
+
+/* stage 3: IPv4 LPM routing */
 table route {
     key     { ipv4.dst : lpm; }
     actions { forward; drop_pkt; }
     default_action drop_pkt();
 }
 
-/* stage 3: MAC rewrite per egress port */
+/* stage 4: MAC rewrite per egress port */
 table mac_rewrite {
     key     { meta.egress_port : exact; }
     actions { set_macs; nop; }
@@ -191,7 +204,10 @@ control ingress {
         apply(qos_t);          /* stage 1: DSCP marking */
     }
     if (valid(ipv4)) {
-        apply(route);          /* stage 2: L3 forwarding */
+        apply(ttl_check);      /* stage 2: drop TTL=0 */
     }
-    apply(mac_rewrite);        /* stage 3: MAC rewrite */
+    if (valid(ipv4)) {
+        apply(route);          /* stage 3: L3 forwarding */
+    }
+    apply(mac_rewrite);        /* stage 4: MAC rewrite */
 }

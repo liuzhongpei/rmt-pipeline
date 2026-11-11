@@ -315,6 +315,7 @@ int main(int argc, char **argv)
     /* ---- 2. Compile pipeline, quantize + install model ---- */
     printf("\n---- 2. compile p4/enc_classify.p4 + install model ----\n");
     rmt_pipeline_t *sw = rmt_create();
+    if (!sw) { fprintf(stderr, "enc_classify_demo: rmt_create failed\n"); return 1; }
     if (p4c_compile_file(sw, "p4/enc_classify.p4") < 0 ||
         rmt_load_entries(sw, "entries/enc_classify.txt") < 0) {
         fprintf(stderr, "FATAL: cannot set up pipeline\n");

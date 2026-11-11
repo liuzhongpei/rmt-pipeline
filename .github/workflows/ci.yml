@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build: [release, debug, asan]
+        include:
+          - build: release
+            target: all
+          - build: debug
+            target: debug
+          - build: asan
+            target: asan
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y gcc make
+
+    - name: Build (${{ matrix.build }})
+      run: make ${{ matrix.target }}
+
+    - name: Run tests
+      run: make check
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install cppcheck
+      run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+    - name: Run cppcheck
+      run: |
+        cppcheck --enable=warning,style --error-exitcode=1 \
+          --suppress=missingIncludeSystem \
+          -Iinclude src/ 2>&1 | tee cppcheck.log
+        # cppcheck issues are advisory; don't fail the build yet

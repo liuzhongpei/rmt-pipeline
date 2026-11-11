@@ -8,14 +8,18 @@ NDNDEMO := bin/ndn_demo
 IDSDEMO := bin/ids_demo
 TELDEMO := bin/telescope_demo
 TESTMATCH := bin/test_match
+TESTALU   := bin/test_alu
+TESTPARSER := bin/test_parser
+TESTSKETCH := bin/test_sketch
 ENCDEMO  := bin/enc_classify_demo
 NCDEMO   := bin/nc_demo
+SKETCHDEMO := bin/sketch_demo_driver
 CORE    := src/phv.c src/parser.c src/match.c src/alu.c \
            src/pipeline.c src/p4c.c src/runtime.c src/cache.c src/dnn.c \
-           src/mq.c
+           src/mq.c src/sketch.c
 COBJS   := $(CORE:src/%.c=build/%.o)
 
-all: $(DEMO) $(TESTS) $(INTDEMO) $(NDNDEMO) $(IDSDEMO) $(TELDEMO) $(TESTMATCH) $(ENCDEMO) $(NCDEMO)
+all: $(DEMO) $(TESTS) $(INTDEMO) $(NDNDEMO) $(IDSDEMO) $(TELDEMO) $(TESTMATCH) $(TESTALU) $(TESTPARSER) $(TESTSKETCH) $(ENCDEMO) $(NCDEMO) $(SKETCHDEMO)
 
 # debug build (with -g, no -march=native)
 debug: CFLAGS := $(CFLAGS_DBG)
@@ -42,11 +46,23 @@ $(TELDEMO): $(COBJS) build/telescope_demo.o | bin
 $(TESTMATCH): $(COBJS) build/test_match.o | bin
 	$(CC) $(CFLAGS) -o $@ $(COBJS) build/test_match.o -lm
 
+$(TESTALU): $(COBJS) build/test_alu.o | bin
+	$(CC) $(CFLAGS) -o $@ $(COBJS) build/test_alu.o
+
+$(TESTPARSER): $(COBJS) build/test_parser.o | bin
+	$(CC) $(CFLAGS) -o $@ $(COBJS) build/test_parser.o
+
+$(TESTSKETCH): $(COBJS) build/test_sketch.o | bin
+	$(CC) $(CFLAGS) -o $@ $(COBJS) build/test_sketch.o
+
 $(ENCDEMO): $(COBJS) build/enc_classify_demo.o | bin
 	$(CC) $(CFLAGS) -o $@ $(COBJS) build/enc_classify_demo.o -lm
 
 $(NCDEMO): $(COBJS) build/nc_demo.o | bin
 	$(CC) $(CFLAGS) -o $@ $(COBJS) build/nc_demo.o -lm
+
+$(SKETCHDEMO): $(COBJS) build/sketch_demo_driver.o | bin
+	$(CC) $(CFLAGS) -o $@ $(COBJS) build/sketch_demo_driver.o
 
 build/%.o: src/%.c include/rmt.h | build
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -75,10 +91,17 @@ telescope: $(TELDEMO)
 clean:
 	rm -rf build bin
 
-.PHONY: all run test int ndn ids telescope test-match enc-classify nc clean debug bench pgo
-
 test-match: $(TESTMATCH)
 	./$(TESTMATCH)
+
+test-alu: $(TESTALU)
+	./$(TESTALU)
+
+test-parser: $(TESTPARSER)
+	./$(TESTPARSER)
+
+test-sketch: $(TESTSKETCH)
+	./$(TESTSKETCH)
 
 enc-classify: $(ENCDEMO)
 	./$(ENCDEMO)
@@ -93,33 +116,87 @@ bench: $(TESTS)
 	./$(TESTS) tcpmq 8
 
 # ---- Profile-Guided Optimization (PGO): 2-pass build ----
-# Pass 1: instrument, run benchmark to collect profile data
-# Pass 2: rebuild with profile feedback (10-20% additional speedup)
+# GCC names LTO profile data after the *output binary*, so pass 1 must
+# produce the same binaries that pass 2 will rebuild (the old target
+# trained bin/rmt_tests_pgo and therefore never found the .gcda files).
+# All binaries are trained so every source's profile is available.
+PGO_BINS := $(DEMO) $(TESTS) $(INTDEMO) $(NDNDEMO) $(IDSDEMO) $(TELDEMO) $(ENCDEMO) $(NCDEMO)
+
 pgo:
 	@echo "=== PGO pass 1: instrumented build ==="
 	rm -rf build bin
 	mkdir -p build bin
-	$(CC) $(CFLAGS) -fprofile-generate=build/prof $(CORE) src/tests.c -o bin/rmt_tests_pgo -lm
-	@echo "=== PGO pass 1: training run ==="
-	./bin/rmt_tests_pgo bulk 20000 >/dev/null 2>&1
-	./bin/rmt_tests_pgo par 4 >/dev/null 2>&1
-	./bin/rmt_tests_pgo mq 4 >/dev/null 2>&1
-	./bin/rmt_tests_pgo tcpmq 8 >/dev/null 2>&1
+	$(MAKE) $(PGO_BINS) CFLAGS="$(CFLAGS) -fprofile-generate=build/prof"
+	@echo "=== PGO pass 1: training runs (exit status ignored:"
+	@echo "    instrumented builds can trip timing assertions under load) ==="
+	-./$(TESTS) bulk 20000 >/dev/null 2>&1
+	-./$(TESTS) par 4 >/dev/null 2>&1
+	-./$(TESTS) mq 4 >/dev/null 2>&1
+	-./$(TESTS) tcpmq 8 >/dev/null 2>&1
+	-./$(DEMO) p4/srv6.p4 entries/srv6_entries.txt >/dev/null 2>&1
+	-./$(INTDEMO) >/dev/null 2>&1
+	-./$(NDNDEMO) >/dev/null 2>&1
+	-./$(IDSDEMO) >/dev/null 2>&1
+	-./$(TELDEMO) >/dev/null 2>&1
+	-./$(ENCDEMO) >/dev/null 2>&1
+	-./$(NCDEMO) >/dev/null 2>&1
 	@echo "=== PGO pass 2: optimized rebuild ==="
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/tests.c -o bin/rmt_tests -lm
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/main.c -o bin/rmt_demo
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/int_demo.c -o bin/int_demo
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/ndn_demo.c -o bin/ndn_demo
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/ids_demo.c -o bin/ids_demo -lm
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/telescope_demo.c -o bin/telescope_demo
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/enc_classify_demo.c -o bin/enc_classify_demo -lm
-	$(CC) $(CFLAGS) -fprofile-use=build/prof -fprofile-correction $(CORE) src/nc_demo.c -o bin/nc_demo -lm
+	rm -f build/*.o $(PGO_BINS)
+	$(MAKE) $(PGO_BINS) CFLAGS="$(CFLAGS) -fprofile-use=build/prof -fprofile-correction"
 	@echo "=== PGO build complete ==="
 
-# pcap test target
-pcap-test: build/phv.o build/parser.o build/match.o build/alu.o build/pipeline.o \
-           build/p4c.o build/runtime.o build/cache.o build/dnn.o build/mq.o build/pcap_test.o
-	gcc -O3 -flto -march=native -o bin/pcap_test $^ -lm
+# pcap test target (honours CC/CFLAGS like every other binary)
+pcap-test: $(COBJS) build/pcap_test.o | bin
+	$(CC) $(CFLAGS) -o bin/pcap_test $^ -lm
 
-build/pcap_test.o: src/pcap_test.c include/rmt.h
-	gcc -O3 -flto -march=native -Wall -Wextra -std=c11 -pthread -Iinclude -c -o $@ $<
+# ---- check: run ALL tests at once ----
+check: all
+	@echo "==== test_match ===="
+	./bin/test_match
+	@echo ""
+	@echo "==== test_alu ===="
+	./bin/test_alu
+	@echo ""
+	@echo "==== test_parser ===="
+	./bin/test_parser
+	@echo ""
+	@echo "==== test_sketch ===="
+	./bin/test_sketch
+	@echo ""
+	@echo "==== rmt_tests ===="
+	./bin/rmt_tests
+	@echo ""
+	@echo "==== int_demo ===="
+	./bin/int_demo
+	@echo ""
+	@echo "==== ndn_demo ===="
+	./bin/ndn_demo
+	@echo ""
+	@echo "==== ids_demo ===="
+	./bin/ids_demo
+	@echo ""
+	@echo "==== telescope_demo ===="
+	./bin/telescope_demo
+	@echo ""
+	@echo "==== enc_classify_demo ===="
+	./bin/enc_classify_demo
+	@echo ""
+	@echo "==== nc_demo ===="
+	./bin/nc_demo
+	@echo ""
+	@echo "==== ALL CHECKS PASSED ===="
+
+# ---- Sanitizer builds (for debugging) ----
+# AddressSanitizer: catches buffer overflows, use-after-free, memory leaks
+asan: clean
+	$(MAKE) all CFLAGS="-O1 -g -fsanitize=address -fno-omit-frame-pointer -Wall -Wextra -std=c11 -pthread -Iinclude"
+
+# ThreadSanitizer: catches data races (disable LTO — incompatible with TSan)
+tsan: clean
+	$(MAKE) all CFLAGS="-O1 -g -fsanitize=thread -fno-omit-frame-pointer -fno-optimize-sibling-calls -Wall -Wextra -std=c11 -pthread -Iinclude" LDFLAGS="-fsanitize=thread"
+
+# UndefinedBehaviorSanitizer: catches signed overflow, alignment, etc.
+ubsan: clean
+	$(MAKE) all CFLAGS="-O1 -g -fsanitize=undefined -fno-omit-frame-pointer -Wall -Wextra -std=c11 -pthread -Iinclude"
+
+.PHONY: all run test int ndn ids telescope test-match test-alu test-parser test-sketch enc-classify nc clean debug bench pgo check asan tsan ubsan pcap-test

@@ -37,8 +37,9 @@ static void pkt_get_bits(const uint8_t *pkt, int bitoff, int nbits, fv_t *out)
     }
 }
 
-/* write nbits of fv into pkt at bit offset */
-static void pkt_put_bits(uint8_t *pkt, int bitoff, const fv_t *in, int nbits)
+/* write nbits of fv into pkt at bit offset (exported for the
+ * in-place deparse fast path in pipeline.c)                          */
+void rmt_field_write(uint8_t *pkt, int bitoff, const fv_t *in, int nbits)
 {
     /* fast path: byte-aligned field, whole bytes copied out */
     if (((bitoff | nbits) & 7) == 0) {
@@ -76,8 +77,11 @@ static int extract_hdr(const rmt_pipeline_t *p, int hdr, const uint8_t *pkt,
         for (int i = 0; i < h->nfields; i++) {
             int fid = h->first_field + i;
             int blen = p->fdefs[fid].bitlen;
-            /* if the individual field is also byte-aligned (99% case) */
-            if (RMT_LIKELY((blen & 7) == 0)) {
+            /* byte-copy only when both the field's ABSOLUTE bit offset
+             * and its width are byte aligned (a byte-wide field that
+             * starts mid-byte, e.g. tclass:8 after version:4, must go
+             * through the bit-exact path).                          */
+            if (RMT_LIKELY((((*bitoff + boff) | blen) & 7) == 0)) {
                 int nb = blen >> 3;
                 fv_t *fv = &phv->fields[fid];
                 fv->bitlen = (uint16_t)blen;
@@ -112,6 +116,12 @@ int rmt_parse(const rmt_pipeline_t *p, const uint8_t *pkt, int len,
     int st = p->start_state;
     int bitoff = 0;
     int guard = 0;
+    /* Headers are extracted in packet order; rmt_deparse emits them in
+     * declaration order. The in-place deparse fast path patches fields
+     * at declaration-order offsets, so it is only valid while the two
+     * orders agree. If a pipeline extracts a lower-id header after a
+     * higher one, force the full deparse to keep output canonical.   */
+    int last_hdr = -1;
 
     while (st != PS_ACCEPT) {
         if (st < 0 || st >= p->nstates || ++guard > 64) {
@@ -125,6 +135,10 @@ int rmt_parse(const rmt_pipeline_t *p, const uint8_t *pkt, int len,
         for (int i = 0; i < s->nops; i++) {
             const parse_op_t *op = &s->ops[i];
             if (op->kind == POP_EXTRACT) {
+                if (op->hdr <= last_hdr)
+                    phv->structural = true;   /* out-of-order extraction */
+                else
+                    last_hdr = op->hdr;
                 if (extract_hdr(p, op->hdr, pkt, len, &bitoff, phv) < 0)
                     return -1;
             } else { /* POP_EXTRACT_ARRAY */
@@ -133,17 +147,24 @@ int rmt_parse(const rmt_pipeline_t *p, const uint8_t *pkt, int len,
                 /* find the array this header belongs to, clamp count */
                 for (int a = 0; a < p->narrs; a++)
                     if (p->adefs[a].first_hdr == op->hdr &&
-                        cnt > (uint64_t)p->adefs[a].count)
+                        cnt > (uint64_t)p->adefs[a].count) {
                         cnt = (uint64_t)p->adefs[a].count;
+                        break;
+                    }
                 /* hard cap: never exceed header table bounds */
                 int max_cnt = (op->hdr < p->nhdrs)
                             ? (p->nhdrs - op->hdr) : 0;
                 if (cnt > (uint64_t)max_cnt)
                     cnt = (uint64_t)max_cnt;
-                for (uint64_t k = 0; k < cnt; k++)
-                    if (extract_hdr(p, op->hdr + (int)k, pkt, len,
-                                    &bitoff, phv) < 0)
+                for (uint64_t k = 0; k < cnt; k++) {
+                    int hid = op->hdr + (int)k;
+                    if (hid <= last_hdr)
+                        phv->structural = true;  /* out-of-order extraction */
+                    else
+                        last_hdr = hid;
+                    if (extract_hdr(p, hid, pkt, len, &bitoff, phv) < 0)
                         return -1;
+                }
             }
         }
 
@@ -174,8 +195,8 @@ int rmt_deparse(const rmt_pipeline_t *p, const phv_t *phv,
             return -1;
         for (int i = 0; i < hd->nfields; i++) {
             int fid = hd->first_field + i;
-            pkt_put_bits(out, bitoff, &phv->fields[fid],
-                         p->fdefs[fid].bitlen);
+            rmt_field_write(out, bitoff, &phv->fields[fid],
+                            p->fdefs[fid].bitlen);
             bitoff += p->fdefs[fid].bitlen;
         }
     }

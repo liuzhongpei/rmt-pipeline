@@ -94,6 +94,7 @@ int main(int argc, char **argv)
     printf("=== MORP4-style dynamic network telescope ===\n\n");
 
     rmt_pipeline_t *sw = rmt_create();
+    if (!sw) { fprintf(stderr, "telescope_demo: rmt_create failed\n"); return 1; }
     if (p4c_compile_file(sw, "p4/telescope.p4") < 0 ||
         rmt_load_entries(sw, "entries/telescope.txt") < 0)
         return 1;

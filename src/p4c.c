@@ -82,6 +82,8 @@ static void next(p4c_t *c)
                     c->line++;
                 c->pos++;
             }
+            if (c->pos + 1 >= c->len)
+                perr(c, "unterminated /* */ comment");
             c->pos += 2;
             continue;
         }
@@ -236,6 +238,8 @@ static void parse_header(p4c_t *c, bool is_meta)
     next(c); /* '}' */
 
     if (arr == 0) {
+        if (rmt_hdr_id(p, name) >= 0)
+            perr(c, "duplicate header name");
         int h = rmt_hdr_add(p, name, is_meta);
         if (h < 0)
             perr(c, "too many headers");
@@ -390,8 +394,13 @@ static void sched(p4c_t *c, rmt_action_t *a, alu_insn_t in)
             if (e->op == OP_VALID || e->op == OP_INVALID)
                 continue;
             int wfd = e->fd;
-            if (wfd < 0)             /* writes no PHV field (extern)  */
+            if (wfd < 0) {
+                /* fd=-1: fire-and-forget extern ops (cs_insert, util_mark,
+                 * util_probe) that write no PHV field. Safe to skip
+                 * dependency tracking: they have no observable effect on
+                 * subsequent instructions in the same action. */
                 continue;
+            }
             bool conflict = false;
             if (in.op != OP_VALID && in.op != OP_INVALID) {
                 if (wfd == in.fs1 || wfd == in.fs2 || wfd == in.fd)
@@ -468,6 +477,16 @@ static int dnn_find(p4c_t *c, const char *name)
         if (!strcmp(rmt_dnn_name(c->pipe->dnns[i]), name))
             return i;
     perr(c, "unknown dnn extern");
+    return -1;
+}
+
+/* sketch extern instance by name (declared via "sketch name(d,w,fields...);") */
+static int sketch_find(p4c_t *c, const char *name)
+{
+    for (int i = 0; i < c->pipe->nsketches; i++)
+        if (!strcmp(rmt_sketch_name(c->pipe->sketches[i]), name))
+            return i;
+    perr(c, "unknown sketch extern");
     return -1;
 }
 
@@ -575,10 +594,47 @@ static void parse_action(p4c_t *c)
             alu_insn_t in = insn0(OP_DNN_INFER);
             in.imm = dnn_find(c, dn);
             in.fd = (int16_t)dst;
-            /* order after writes to the first feature field (the
-             * remaining features must be pre-action header fields) */
+            /* Order after writes to the first two feature fields; the
+             * remaining features must be ready before the action.      */
             in.fs1 = (int16_t)rmt_dnn_input_fid(
                 c->pipe->dnns[in.imm], 0);
+            if (rmt_dnn_num_inputs(c->pipe->dnns[in.imm]) > 1)
+                in.fs2 = (int16_t)rmt_dnn_input_fid(
+                    c->pipe->dnns[in.imm], 1);
+            sched(c, a, in);
+            continue;
+        }
+
+        /* Count-Min Sketch extern:
+         *   sketch_inc(name);           -- atomically increment d counters
+         *   sketch_get(name, dst_field); -- fd = min of d counters       */
+        if (!strcmp(prim, "sketch_inc") || !strcmp(prim, "sketch_get")) {
+            int is_get = (prim[7] == 'g');   /* sketch_get vs sketch_inc */
+            expect_punct(c, '(');
+            char sn[RMT_NAME_LEN];
+            expect_id(c, sn, sizeof(sn));
+            int sidx = sketch_find(c, sn);
+            alu_insn_t in = insn0(is_get ? OP_SKETCH_GET : OP_SKETCH_INC);
+            in.imm = sidx;
+            /* The extern reads the flow-key fields bound at the sketch
+             * declaration, which the generic operand analysis cannot see.
+             * Expose the first two keys as fs1/fs2 so sched() orders the
+             * extern after writes to them (VLIW reads old values, so an
+             * unencoded dependency would count a stale key). Remaining
+             * key fields must already be ready before the action.      */
+            if (sidx >= 0 && sidx < c->pipe->nsketches) {
+                const rmt_sketch_t *sk = c->pipe->sketches[sidx];
+                if (sk->nkeys > 0) in.fs1 = (int16_t)sk->key_fids[0];
+                if (sk->nkeys > 1) in.fs2 = (int16_t)sk->key_fids[1];
+            }
+            if (is_get) {
+                expect_punct(c, ',');
+                in.fd = (int16_t)expect_fieldref(c);
+            } else {
+                in.fd = -1;    /* no PHV write for inc (fire-and-forget) */
+            }
+            expect_punct(c, ')');
+            expect_punct(c, ';');
             sched(c, a, in);
             continue;
         }
@@ -787,6 +843,8 @@ static void parse_apply(p4c_t *c, int pred_hdr)
     expect_punct(c, ')');
     expect_punct(c, ';');
     rmt_table_t *t = table_find(c, tn);
+    if (t->stage >= 0)
+        perr(c, "table applied more than once");
     if (c->next_stage >= RMT_MAX_STAGES)
         perr(c, "control flow needs more stages than available");
     t->stage = c->next_stage++;
@@ -871,6 +929,36 @@ static void parse_dnn(p4c_t *c)
     p->dnns[p->ndnns++] = d;
 }
 
+/* sketch <name>(<depth>, <width>, <field>, <field>, ...);
+ * Count-Min Sketch extern for flow frequency estimation.
+ * depth = number of hash functions (rows), width = counters per row.
+ * Following fields are the flow-key (bound at declaration).         */
+static void parse_sketch(p4c_t *c)
+{
+    rmt_pipeline_t *p = c->pipe;
+    if (p->nsketches >= RMT_MAX_SKETCHES)
+        perr(c, "too many sketch externs");
+    char name[RMT_NAME_LEN];
+    expect_id(c, name, sizeof(name));
+    expect_punct(c, '(');
+    int d = (int)expect_num(c);
+    expect_punct(c, ',');
+    int w = (int)expect_num(c);
+    int fids[RMT_DNN_MAX_IN], nin = 0;
+    while (!is_punct(c, ')')) {
+        expect_punct(c, ',');
+        if (nin >= RMT_DNN_MAX_IN)
+            perr(c, "too many sketch key fields");
+        fids[nin++] = expect_fieldref(c);
+    }
+    next(c); /* ')' */
+    expect_punct(c, ';');
+    rmt_sketch_t *s = rmt_sketch_create(name, d, w, nin, fids);
+    if (!s)
+        perr(c, "bad sketch declaration");
+    p->sketches[p->nsketches++] = s;
+}
+
 /* ------------------------------------------------------------------ */
 /* driver                                                             */
 /* ------------------------------------------------------------------ */
@@ -883,11 +971,17 @@ int p4c_compile_file(rmt_pipeline_t *p, const char *path)
     }
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
+    if (sz < 0) {
+        fclose(fp);
+        fprintf(stderr, "p4c: cannot determine size of %s\n", path);
+        return -1;
+    }
     fseek(fp, 0, SEEK_SET);
 
     p4c_t c;
     memset(&c, 0, sizeof(c));
     c.src = (char *)malloc((size_t)sz + 1);
+    if (!c.src) { fclose(fp); return -1; }
     c.len = fread(c.src, 1, (size_t)sz, fp);
     c.src[c.len] = 0;
     fclose(fp);
@@ -896,6 +990,16 @@ int p4c_compile_file(rmt_pipeline_t *p, const char *path)
     c.next_stage = 0;
 
     if (setjmp(c.err)) {
+        /* cleanup: destroy any caches/dnns/sketches/tables allocated before the error */
+        for (int i = 0; i < p->ncaches; i++)
+            rmt_cache_destroy(p->caches[i]);
+        for (int i = 0; i < p->ndnns; i++)
+            rmt_dnn_destroy(p->dnns[i]);
+        for (int i = 0; i < p->nsketches; i++)
+            rmt_sketch_destroy(p->sketches[i]);
+        for (int i = 0; i < p->ntables; i++)
+            rmt_table_free(&p->tables[i]);
+        p->ncaches = p->ndnns = p->nsketches = p->ntables = 0;
         free(c.src);
         return -1;
     }
@@ -912,6 +1016,8 @@ int p4c_compile_file(rmt_pipeline_t *p, const char *path)
             parse_cache(&c);
         else if (accept_kw(&c, "dnn"))
             parse_dnn(&c);
+        else if (accept_kw(&c, "sketch"))
+            parse_sketch(&c);
         else if (accept_kw(&c, "action"))
             parse_action(&c);
         else if (accept_kw(&c, "table"))

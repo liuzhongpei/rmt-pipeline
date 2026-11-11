@@ -1,5 +1,7 @@
 # DNN-based in-network IDS (p4/ids.p4)
 #
+# hop_check: drop TTL=0 packets (RFC 1812)
+table_add ttl_check ttl_expired 0 =>
 # ids_t: run the MLP on TCP (proto 6)
 table_add ids_t classify 6 =>
 # verdict_t: class 1 (anomaly) -> quarantine (drop)

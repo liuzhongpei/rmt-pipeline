@@ -217,6 +217,7 @@ int main(int argc, char **argv)
     /* -- 2. compile the dataplane, quantize + install the model -- */
     printf("\n---- 2. quantize (Q16.16) and install into the extern ----\n");
     rmt_pipeline_t *sw = rmt_create();
+    if (!sw) { fprintf(stderr, "ids_demo: rmt_create failed\n"); return 1; }
     if (p4c_compile_file(sw, "p4/ids.p4") < 0 ||
         rmt_load_entries(sw, "entries/ids.txt") < 0)
         return 1;

@@ -9,6 +9,8 @@
  *   5. Multiple entries with same key (first-inserted wins)
  *   6. rmt_load_entries() file-based loading and lookup verification
  *   7. Edge cases: empty table, zero-length prefix (wildcard)
+ *   8. Multi-field LPM cross-field backtracking (README §3.4)
+ *   9. IPv6 LPM shared-prefix / split + insertion-order independence
  *
  * Build:  gcc -O2 -Wall -Wextra -std=c11 -pthread -Iinclude \
  *              src/test_match.c src/phv.c src/parser.c src/match.c src/alu.c \
@@ -82,6 +84,17 @@ static void entry_set_key_ipv4(rmt_entry_t *e, int kidx,
     e->key[kidx][13] = (uint8_t)(v >> 16);
     e->key[kidx][14] = (uint8_t)(v >> 8);
     e->key[kidx][15] = (uint8_t)(v);
+    e->plen[kidx] = (uint16_t)plen;
+}
+
+/* helper: fill entry key[kidx] from IPv6 + prefix (128-bit, fills key) */
+static void entry_set_key_ipv6(rmt_entry_t *e, int kidx,
+                               const char *ip, int plen)
+{
+    memset(e->key[kidx], 0, 16);
+    struct in6_addr a;
+    inet_pton(AF_INET6, ip, &a);
+    memcpy(e->key[kidx], a.s6_addr, 16);
     e->plen[kidx] = (uint16_t)plen;
 }
 
@@ -511,6 +524,246 @@ static void test_edge_cases(void)
 }
 
 /* ================================================================ */
+/* Test 8: Multi-field LPM cross-field backtracking (README §3.4)    */
+/* Regression: the old greedy walk took the deepest field-0 prefix    */
+/* and never backtracked, so a packet matching a shorter field-0      */
+/* prefix whose continuation exists (while the longest field-0 prefix */
+/* has none) wrongly MISSED.                                          */
+/* ================================================================ */
+static void test_multi_lpm_backtrack(void)
+{
+    printf("\n---- Test 8: multi-field LPM cross-field backtracking ----\n");
+
+    rmt_pipeline_t *p = rmt_create();
+    int hdr = rmt_hdr_add(p, "ipv4", false);
+    int f_src = rmt_field_add(p, hdr, "ipv4.src", 32);
+    int f_dst = rmt_field_add(p, hdr, "ipv4.dst", 32);
+
+    rmt_table_t *t = &p->tables[0];
+    memset(t, 0, sizeof(*t));
+    strcpy(t->name, "policy");
+    t->nkeys = 2;
+    t->keys[0].field_id = f_src;
+    t->keys[0].mtype = MATCH_LPM;
+    t->keys[1].field_id = f_dst;
+    t->keys[1].mtype = MATCH_LPM;
+    t->default_action = -1;
+    p->ntables = 1;
+
+    rmt_entry_t e; memset(&e, 0, sizeof(e));
+    e.action_id = 1; e.nparams = 1;
+
+    /* entry A: src 10.0.0.0/8 + dst 0.0.0.0/0 (wildcard) -> param=100 */
+    entry_set_key_ipv4(&e, 0, "10.0.0.0", 8);
+    entry_set_key_ipv4(&e, 1, "0.0.0.0", 0);
+    e.params[0] = 100;
+    chk("insert A (10/8, any dst)", rmt_table_insert(p, t, &e) != NULL);
+
+    /* entry B: src 10.1.0.0/16 + dst 192.168.0.0/16 -> param=200 */
+    entry_set_key_ipv4(&e, 0, "10.1.0.0", 16);
+    entry_set_key_ipv4(&e, 1, "192.168.0.0", 16);
+    e.params[0] = 200;
+    chk("insert B (10.1/16, 192.168/16)", rmt_table_insert(p, t, &e) != NULL);
+
+    phv_t phv; memset(&phv, 0, sizeof(phv));
+
+    /* (10.1.2.3, 192.168.1.1): field-0 longest prefix /16 (B) has a
+     * dst completion -> B wins. */
+    set_field_ipv4(&phv.fields[f_src], "10.1.2.3");
+    set_field_ipv4(&phv.fields[f_dst], "192.168.1.1");
+    rmt_entry_t *r = rmt_table_lookup(p, t, &phv);
+    chk("(10.1.2.3, 192.168.1.1) -> B param=200", r && r->params[0] == 200);
+
+    /* REGRESSION (report P0): (10.1.2.3, 8.8.8.8). Field-0 longest
+     * prefix is still /16 (B), but B's dst 192.168/16 cannot match
+     * 8.8.8.8; must backtrack to the shorter src prefix /8 (A), whose
+     * dst wildcard completes. Old code returned NULL here. */
+    set_field_ipv4(&phv.fields[f_dst], "8.8.8.8");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("(10.1.2.3, 8.8.8.8) backtracks to A param=100",
+        r && r->params[0] == 100);
+
+    /* (10.9.9.9, 8.8.8.8): field-0 only matches /8 (A) directly. */
+    set_field_ipv4(&phv.fields[f_src], "10.9.9.9");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("(10.9.9.9, 8.8.8.8) -> A param=100", r && r->params[0] == 100);
+
+    /* (11.0.0.1, 8.8.8.8): no field-0 candidate at all -> miss. */
+    set_field_ipv4(&phv.fields[f_src], "11.0.0.1");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("(11.0.0.1, 8.8.8.8) -> miss", r == NULL);
+
+    rmt_table_free(t);
+    rmt_destroy(p);
+}
+
+/* Deeper variant: 3 LPM keys, backtracking spans two field levels.   */
+static void test_multi_lpm_backtrack_3key(void)
+{
+    printf("\n---- Test 8b: 3-key LPM backtracking across two levels ----\n");
+
+    rmt_pipeline_t *p = rmt_create();
+    int hdr = rmt_hdr_add(p, "ipv4", false);
+    int f_a = rmt_field_add(p, hdr, "ipv4.src", 32);
+    int f_b = rmt_field_add(p, hdr, "ipv4.dst", 32);
+    int f_c = rmt_field_add(p, hdr, "ipv4.proto32", 32); /* synthetic */
+
+    rmt_table_t *t = &p->tables[0];
+    memset(t, 0, sizeof(*t));
+    strcpy(t->name, "deep");
+    t->nkeys = 3;
+    t->keys[0].field_id = f_a; t->keys[0].mtype = MATCH_LPM;
+    t->keys[1].field_id = f_b; t->keys[1].mtype = MATCH_LPM;
+    t->keys[2].field_id = f_c; t->keys[2].mtype = MATCH_LPM;
+    t->default_action = -1;
+    p->ntables = 1;
+
+    rmt_entry_t e; memset(&e, 0, sizeof(e));
+    e.action_id = 1; e.nparams = 1;
+
+    /* X: a/8  + b/8  + c 0/0 (wildcard) -> param=1 */
+    entry_set_key_ipv4(&e, 0, "10.0.0.0", 8);
+    entry_set_key_ipv4(&e, 1, "10.0.0.0", 8);
+    entry_set_key_ipv4(&e, 2, "0.0.0.0", 0);
+    e.params[0] = 1;
+    chk("insert X (a/8, b/8, c any)", rmt_table_insert(p, t, &e) != NULL);
+
+    /* Y: a/16 + b/16 + c 1.0.0.0/8 -> param=2 */
+    entry_set_key_ipv4(&e, 0, "10.1.0.0", 16);
+    entry_set_key_ipv4(&e, 1, "10.1.0.0", 16);
+    entry_set_key_ipv4(&e, 2, "1.0.0.0", 8);
+    e.params[0] = 2;
+    chk("insert Y (a/16, b/16, c 1/8)", rmt_table_insert(p, t, &e) != NULL);
+
+    phv_t phv; memset(&phv, 0, sizeof(phv));
+
+    /* (10.1.2.3, 10.1.9.9, 1.2.3.4): Y fully matches -> 2 */
+    set_field_ipv4(&phv.fields[f_a], "10.1.2.3");
+    set_field_ipv4(&phv.fields[f_b], "10.1.9.9");
+    set_field_ipv4(&phv.fields[f_c], "1.2.3.4");
+    rmt_entry_t *r = rmt_table_lookup(p, t, &phv);
+    chk("full Y match -> param=2", r && r->params[0] == 2);
+
+    /* (10.1.2.3, 10.1.9.9, 9.9.9.9): field-2 fails under Y (c 1/8);
+     * backtrack: Y's a/16+b/16 has no other c, so climb all the way
+     * to X (a/8+b/8, c wildcard) -> 1. Exercises two-level unwind. */
+    set_field_ipv4(&phv.fields[f_c], "9.9.9.9");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("c fails -> backtrack two levels to X param=1",
+        r && r->params[0] == 1);
+
+    /* (10.1.2.3, 10.9.9.9, 1.2.3.4): field-1 fails under Y's b/16;
+     * backtrack to X's b/8 -> 1. */
+    set_field_ipv4(&phv.fields[f_b], "10.9.9.9");
+    set_field_ipv4(&phv.fields[f_c], "1.2.3.4");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("b fails -> backtrack to X param=1", r && r->params[0] == 1);
+
+    /* (10.1.2.3, 10.1.9.9, 1.2.3.4) but remove... keep simple: a
+     * full miss outside every prefix. */
+    set_field_ipv4(&phv.fields[f_a], "172.16.0.1");
+    r = rmt_table_lookup(p, t, &phv);
+    chk("outside all prefixes -> miss", r == NULL);
+
+    rmt_table_free(t);
+    rmt_destroy(p);
+}
+
+/* ================================================================ */
+/* Test 9 / 9b: IPv6 LPM with a long shared prefix and mixed prefix  */
+/* lengths. These stress node splitting (radix) and pin insertion-    */
+/* order independence of the lookup result.                           */
+/* ================================================================ */
+struct ipv6spec { const char *ip; int plen; uint64_t param; };
+static const struct ipv6spec ipv6set[] = {
+    { "fd00::",          16,  1 },
+    { "fd00:0:0:1::",    64,  2 },
+    { "fd00:0:0:1::1",  128,  3 },
+    { "fd00:0:0:1::2",  128,  4 },
+    { "fd00:0:0:2::1",  128,  5 },
+};
+
+static rmt_entry_t *e_init(rmt_entry_t *e, int idx)
+{
+    entry_set_key_ipv6(e, 0, ipv6set[idx].ip, ipv6set[idx].plen);
+    e->params[0] = ipv6set[idx].param;
+    return e;
+}
+
+static rmt_table_t *ipv6_lpm_build(rmt_pipeline_t *p, int fid,
+                                   const int *order, int n, const char *name)
+{
+    rmt_table_t *t = &p->tables[p->ntables];
+    p->ntables++;
+    memset(t, 0, sizeof(*t));
+    strcpy(t->name, name);
+    t->nkeys = 1;
+    t->keys[0].field_id = fid;
+    t->keys[0].mtype = MATCH_LPM;
+    t->default_action = -1;
+    rmt_entry_t e; memset(&e, 0, sizeof(e));
+    e.action_id = 1; e.nparams = 1;
+    for (int i = 0; i < n; i++) {
+        int idx = order[i];
+        chk("  insert", rmt_table_insert(p, t, e_init(&e, idx)) != NULL);
+    }
+    return t;
+}
+
+static void ipv6_lpm_check_lookups(rmt_pipeline_t *p, rmt_table_t *t, int fid)
+{
+    phv_t phv; memset(&phv, 0, sizeof(phv));
+    struct { const char *ip; uint64_t expect; int hit; } cases[] = {
+        { "fd00:0:0:1::1",  3, 1 },   /* /128 exact leaf   */
+        { "fd00:0:0:1::2",  4, 1 },   /* /128 exact leaf   */
+        { "fd00:0:0:1::99", 2, 1 },   /* falls to /64      */
+        { "fd00:0:0:2::1",  5, 1 },   /* /128 exact leaf   */
+        { "fd00:0:0:3::1",  1, 1 },   /* falls to /16      */
+        { "fd00:1::1",      1, 1 },   /* falls to /16      */
+        { "fe80::1",        0, 0 },   /* no match          */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        set_field_ipv6(&phv.fields[fid], cases[i].ip);
+        rmt_entry_t *r = rmt_table_lookup(p, t, &phv);
+        char msg[96];
+        if (cases[i].hit) {
+            snprintf(msg, sizeof(msg), "%s -> param=%llu", cases[i].ip,
+                     (unsigned long long)cases[i].expect);
+            chk(msg, r && r->params[0] == cases[i].expect);
+        } else {
+            snprintf(msg, sizeof(msg), "%s -> miss", cases[i].ip);
+            chk(msg, r == NULL);
+        }
+    }
+}
+
+static void test_ipv6_lpm_split(void)
+{
+    printf("\n---- Test 9: IPv6 LPM shared prefix, longest-first inserts ----\n");
+    rmt_pipeline_t *p = rmt_create();
+    int hdr = rmt_hdr_add(p, "ipv6", false);
+    int fid = rmt_field_add(p, hdr, "ipv6.dst", 128);
+    int order_desc[] = { 2, 3, 4, 1, 0 };   /* /128 leaves before /16 */
+    rmt_table_t *t = ipv6_lpm_build(p, fid, order_desc, 5, "v6_desc");
+    ipv6_lpm_check_lookups(p, t, fid);
+    rmt_table_free(t);
+    rmt_destroy(p);
+}
+
+static void test_ipv6_lpm_order_indep(void)
+{
+    printf("\n---- Test 9b: IPv6 LPM insertion-order independence ----\n");
+    rmt_pipeline_t *p = rmt_create();
+    int hdr = rmt_hdr_add(p, "ipv6", false);
+    int fid = rmt_field_add(p, hdr, "ipv6.dst", 128);
+    int order_asc[] = { 0, 1, 2, 3, 4 };    /* /16 first, leaves last */
+    rmt_table_t *t = ipv6_lpm_build(p, fid, order_asc, 5, "v6_asc");
+    ipv6_lpm_check_lookups(p, t, fid);
+    rmt_table_free(t);
+    rmt_destroy(p);
+}
+
+/* ================================================================ */
 
 int main(void)
 {
@@ -523,6 +776,10 @@ int main(void)
     test_first_insert_wins();
     test_load_entries();
     test_edge_cases();
+    test_multi_lpm_backtrack();
+    test_multi_lpm_backtrack_3key();
+    test_ipv6_lpm_split();
+    test_ipv6_lpm_order_indep();
 
     printf("\n====================================================\n");
     printf("%s (%d failure%s)\n",

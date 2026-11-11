@@ -1,8 +1,31 @@
-# NDN core router (upstream = port 2 to the producer)
+# NDN core router (enhanced: hop check + nonce detect + NACK)
+# Upstream = port 2 to the producer
+
+# hop_check_t: drop packets with hop_limit=0
+table_add hop_check_t hop_expired 0 =>
+
+# nonce_probe_t: only probe Interest (pkt_type=1)
+table_add nonce_probe_t nonce_probe 1 =>
+
+# nonce_check_t: drop Interest with already-seen nonce (loop detection)
+table_add nonce_check_t nonce_drop 1 1 =>
+# nonce_check_t: record nonce for new Interest (pkt_type=1, used=0)
+table_add nonce_check_t nonce_record 1 0 =>
+
+# cs_t: role by packet type
 table_add cs_t cs_check 1 =>
 table_add cs_t cs_store 2 =>
+
+# cs_hit_t: Interest answered from the local Content Store
 table_add cs_hit_t cs_reply 1 1 =>
+
+# pit_t: Interest miss -> breadcrumb; Data -> reverse path
 table_add pit_t pit_add 1 0 =>
 table_add pit_t pit_serve 2 0 =>
+
+# fib_t: /video -> producer (port 2); miss -> NACK (errcode=1)
 table_add fib_t fwd 1 0 0x76696465000000000000000000000000/32 => 2
-table_add fib_t drop_pkt 1 0 0x00000000000000000000000000000000/0 =>
+table_add fib_t make_nack 1 0 0x00000000000000000000000000000000/0 => 1
+
+# mac_rewrite: only for non-CS-reply, non-NACK (cs_hit=0, nack_gen=0)
+table_add mac_rewrite set_macs 2 0 0 => aa:bb:cc:dd:ee:f1 11:22:33:44:55:67

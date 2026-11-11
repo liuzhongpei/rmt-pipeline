@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include "rmt.h"
 
@@ -39,8 +40,10 @@ static int parse_u64(const char *s, uint64_t *out)
         }
     }
     char *end;
+    errno = 0;
     *out = strtoull(s, &end, 0);
-    return (*end == 0) ? 0 : -1;
+    if (errno == ERANGE || *end != 0) return -1;
+    return 0;
 }
 
 /* parse a key token into a right-aligned 128-bit value + prefix len */
@@ -55,7 +58,9 @@ static int parse_key(const char *tok, int bitlen, uint8_t out[16],
     char *slash = strchr(buf, '/');
     if (slash) {
         *slash = 0;
-        *plen = (uint16_t)atoi(slash + 1);
+        int p = atoi(slash + 1);
+        if (p < 0 || p > bitlen) return -1;   /* prefix len out of range */
+        *plen = (uint16_t)p;
     }
 
     if (strchr(buf, ':')) {

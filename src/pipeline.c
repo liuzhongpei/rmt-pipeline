@@ -18,6 +18,7 @@
 rmt_pipeline_t *rmt_create(void)
 {
     rmt_pipeline_t *p = (rmt_pipeline_t *)calloc(1, sizeof(*p));
+    if (!p) return NULL;
     p->start_state = PS_ACCEPT;
     p->fid_drop = p->fid_eport = -1;
     p->fid_iport = p->fid_ts = -1;
@@ -35,6 +36,8 @@ void rmt_destroy(rmt_pipeline_t *p)
         rmt_cache_destroy(p->caches[i]);
     for (int i = 0; i < p->ndnns; i++)
         rmt_dnn_destroy(p->dnns[i]);
+    for (int i = 0; i < p->nsketches; i++)
+        rmt_sketch_destroy(p->sketches[i]);
     free(p);
 }
 
@@ -53,7 +56,9 @@ int rmt_hdr_add(rmt_pipeline_t *p, const char *name, bool is_meta)
 
 int rmt_field_add(rmt_pipeline_t *p, int hdr, const char *fullname, int bitlen)
 {
-    if (p->nfields >= RMT_MAX_FIELDS || bitlen > 128)
+    if (hdr < 0 || hdr >= p->nhdrs)
+        return -1;
+    if (p->nfields >= RMT_MAX_FIELDS || bitlen > 128 || bitlen < 0)
         return -1;
     field_def_t *f = &p->fdefs[p->nfields];
     snprintf(f->name, sizeof(f->name), "%s", fullname);
@@ -101,7 +106,8 @@ void rmt_finalize(rmt_pipeline_t *p)
     memset(p->nstage_tbl, 0, sizeof(p->nstage_tbl));
     for (int t = 0; t < p->ntables; t++) {
         int s = p->tables[t].stage;
-        if (s >= 0 && s < RMT_MAX_STAGES)
+        if (s >= 0 && s < RMT_MAX_STAGES &&
+            p->nstage_tbl[s] < RMT_MAX_TABLES)
             p->stage_tbl[s][p->nstage_tbl[s]++] = (int8_t)t;
     }
 
@@ -130,6 +136,8 @@ void rmt_phv_reset(const rmt_pipeline_t *p, phv_t *phv)
     phv->pl_len = 0;
     phv->inject_len = 0;
     phv->has_inject = false;
+    memset(phv->dirty, 0, sizeof(phv->dirty));
+    phv->structural = false;
 }
 
 static inline __attribute__((always_inline))
@@ -171,6 +179,38 @@ void apply_table(rmt_pipeline_t * restrict p, rmt_table_t *t, phv_t * restrict p
         rmt_action_exec(p, &p->actions[action_id], params, phv);
 }
 
+/* In-place deparse fast path (report §5.2). For forwarding-style
+ * workloads most header bytes are untouched, so instead of
+ * re-serializing every field (deparse) and copying the payload
+ * separately, copy the whole input packet once and patch back only the
+ * fields an action actually rewrote. Valid only when the actions did
+ * not reshape the packet (no header add/remove, no cache inject).
+ * Returns true when out[] was filled (in_len bytes).                 */
+static inline bool try_inplace(const rmt_pipeline_t *p, const phv_t *phv,
+                               const uint8_t *in_data, int in_len,
+                               uint8_t *out_data)
+{
+    if (RMT_UNLIKELY(phv->structural || phv->has_inject))
+        return false;
+    if (in_len < 0) in_len = 0;
+    if (in_len > RMT_PKT_MAX) in_len = RMT_PKT_MAX;
+    memcpy(out_data, in_data, (size_t)in_len);
+    int bitoff = 0;
+    for (int h = 0; h < p->nhdrs; h++) {
+        const hdr_def_t *hd = &p->hdefs[h];
+        if (hd->is_meta || !phv_hdr_valid(phv, h))
+            continue;
+        for (int i = 0; i < hd->nfields; i++) {
+            int fid = hd->first_field + i;
+            int blen = p->fdefs[fid].bitlen;
+            if (phv->dirty[fid >> 6] & (1ULL << (fid & 63)))
+                rmt_field_write(out_data, bitoff, &phv->fields[fid], blen);
+            bitoff += blen;
+        }
+    }
+    return true;
+}
+
 /* thread-local inject buffer: avoids 2KB stack allocation per-pkt
  * while remaining safe for multi-threaded packet processing.       */
 static __thread uint8_t tls_inject_buf[RMT_PKT_MAX];
@@ -179,6 +219,9 @@ RMT_HOT
 int rmt_process(rmt_pipeline_t * restrict p,
                 const rmt_pkt_t * restrict in, rmt_pkt_t * restrict out)
 {
+    if (RMT_UNLIKELY(!p || !in || !out))
+        return -1;
+
     phv_t phv;
     phv.inject = tls_inject_buf;
     int hdr_bytes = 0;
@@ -187,6 +230,11 @@ int rmt_process(rmt_pipeline_t * restrict p,
     out->in_port = in->in_port;
     out->out_port = -1;
     out->dropped = false;
+
+    /* rmt_pkt_t.data[] is exactly RMT_PKT_MAX bytes: reject lengths the
+     * caller could not have filled (also catches negative ints).      */
+    if (RMT_UNLIKELY((unsigned)in->len > (unsigned)RMT_PKT_MAX))
+        return -1;
 
     rmt_phv_reset(p, &phv);
 
@@ -229,26 +277,30 @@ int rmt_process(rmt_pipeline_t * restrict p,
         return 0;
     }
 
-    int n = rmt_deparse(p, &phv, out->data, RMT_PKT_MAX);
-    if (RMT_UNLIKELY(n < 0))
-        return -1;
-
-    /* append payload: cache-injected content (CS hit reply) replaces
-     * the original payload; otherwise the bytes the parser did not
-     * consume pass through unchanged */
-    if (RMT_UNLIKELY(phv.has_inject)) {
-        if (phv.inject_len > 0 && n + phv.inject_len <= RMT_PKT_MAX) {
-            memcpy(out->data + n, phv.inject, (size_t)phv.inject_len);
-            n += phv.inject_len;
-        }
+    if (try_inplace(p, &phv, in->data, in->len, out->data)) {
+        out->len = in->len;
     } else {
-        int payload = in->len - hdr_bytes;
-        if (RMT_LIKELY(payload > 0 && n + payload <= RMT_PKT_MAX)) {
-            memcpy(out->data + n, in->data + hdr_bytes, (size_t)payload);
-            n += payload;
+        int n = rmt_deparse(p, &phv, out->data, RMT_PKT_MAX);
+        if (RMT_UNLIKELY(n < 0))
+            return -1;
+
+        /* append payload: cache-injected content (CS hit reply) replaces
+         * the original payload; otherwise the bytes the parser did not
+         * consume pass through unchanged */
+        if (RMT_UNLIKELY(phv.has_inject)) {
+            if (phv.inject_len > 0 && n + phv.inject_len <= RMT_PKT_MAX) {
+                memcpy(out->data + n, phv.inject, (size_t)phv.inject_len);
+                n += phv.inject_len;
+            }
+        } else {
+            int payload = in->len - hdr_bytes;
+            if (RMT_LIKELY(payload > 0 && n + payload <= RMT_PKT_MAX)) {
+                memcpy(out->data + n, in->data + hdr_bytes, (size_t)payload);
+                n += payload;
+            }
         }
+        out->len = n;
     }
-    out->len = n;
     out->out_port = (p->fid_eport >= 0)
                     ? (int)fv_get_u64(&phv.fields[p->fid_eport]) : -1;
     if (RMT_UNLIKELY(p->verbose))
@@ -264,14 +316,23 @@ static inline __attribute__((always_inline))
 void process_one(rmt_pipeline_t * restrict p, const rmt_pkt_t * restrict in,
                  rmt_pkt_t * restrict out, uint64_t batch_ts)
 {
+    out->len = 0;
+    out->in_port = 0;
+    out->out_port = -1;
+    out->dropped = false;
+    if (RMT_UNLIKELY(!in)) {
+        out->dropped = true;
+        return;
+    }
+    out->in_port = in->in_port;
+    if (RMT_UNLIKELY((unsigned)in->len > (unsigned)RMT_PKT_MAX)) {
+        out->dropped = true;
+        return;
+    }
+
     phv_t phv;
     phv.inject = tls_inject_buf;
     int hdr_bytes = 0;
-
-    out->len = 0;
-    out->in_port = in->in_port;
-    out->out_port = -1;
-    out->dropped = false;
 
     rmt_phv_reset(p, &phv);
 
@@ -302,9 +363,18 @@ void process_one(rmt_pipeline_t * restrict p, const rmt_pkt_t * restrict in,
         return;
     }
 
-    int n = rmt_deparse(p, &phv, out->data, RMT_PKT_MAX);
-    if (RMT_UNLIKELY(n < 0))
+    if (try_inplace(p, &phv, in->data, in->len, out->data)) {
+        out->len = in->len;
+        out->out_port = (p->fid_eport >= 0)
+                        ? (int)fv_get_u64(&phv.fields[p->fid_eport]) : -1;
         return;
+    }
+
+    int n = rmt_deparse(p, &phv, out->data, RMT_PKT_MAX);
+    if (RMT_UNLIKELY(n < 0)) {
+        out->dropped = true;
+        return;
+    }
 
     if (RMT_UNLIKELY(phv.has_inject)) {
         if (phv.inject_len > 0 && n + phv.inject_len <= RMT_PKT_MAX) {
@@ -338,6 +408,8 @@ int rmt_process_batch(rmt_pipeline_t * restrict p,
                       const rmt_pkt_t * restrict in,
                       rmt_pkt_t * restrict out, int count)
 {
+    if (count <= 0) return 0;
+    if (!p || !in || !out) return -1;
     if (count > RMT_BATCH_MAX)
         count = RMT_BATCH_MAX;
 
@@ -356,6 +428,8 @@ int rmt_process_burst(rmt_pipeline_t * restrict p,
                       rmt_pkt_t * const * restrict in,
                       rmt_pkt_t * restrict out, int count)
 {
+    if (count <= 0) return 0;
+    if (!p || !in || !out) return -1;
     if (count > RMT_BATCH_MAX)
         count = RMT_BATCH_MAX;
 

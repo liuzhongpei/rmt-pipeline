@@ -1,13 +1,14 @@
 /*
  * srv6.p4 - SRv6 (Segment Routing over IPv6) endpoint forwarding on the
- *           RMT pipeline. 4 match-action stages:
+ *           RMT pipeline. 5 match-action stages:
  *
- *   stage 0  local_sid    "My SID" table: SRv6 End behavior
+ *   stage 0  sl_check     segments_left=0 -> drop (SRH exhausted)
+ *   stage 1  local_sid    "My SID" table: SRv6 End behavior
  *                         (SL-=1; dst = seg[SL]; hop_limit-=1)
- *   stage 1  route        IPv6 LPM routing -> egress port
- *   stage 2  acl          5-tuple classification (src, dst, proto,
+ *   stage 2  route        IPv6 LPM routing -> egress port
+ *   stage 3  acl          5-tuple classification (src, dst, proto,
  *                         sport, dport) -> permit / deny
- *   stage 3  mac_rewrite  egress port -> MAC rewrite
+ *   stage 4  mac_rewrite  egress port -> MAC rewrite
  */
 
 /* ------------------------- headers ------------------------- */
@@ -98,6 +99,15 @@ action srv6_end() {
     copy_indexed(ipv6.dst, seg.sid, srh.segments_left);
 }
 
+/* RFC 8754: if SL=0 at a local SID, the SRH has been fully traversed.
+ * Drop the packet here to prevent underflow of segments_left to 255
+ * and out-of-bounds indexed access.  A production deployment would
+ * remove the SRH and forward based on the last segment; this simplified
+ * version drops to avoid silent misroute. */
+action sl_exhausted() {
+    set(meta.drop, 1);
+}
+
 action forward(port) {
     set(meta.egress_port, port);
 }
@@ -122,6 +132,13 @@ action nop() {
 }
 
 /* ------------------------- tables -------------------------- */
+/* pre-check: drop packets with exhausted SRH (SL=0) */
+table sl_check {
+    key     { srh.segments_left : exact; }
+    actions { sl_exhausted; nop; }
+    default_action nop();
+}
+
 table local_sid {
     key     { ipv6.dst : lpm; }
     actions { srv6_end; nop; }
@@ -144,7 +161,7 @@ table acl {
         udp.dport     : exact;
     }
     actions { permit; deny; }
-    default_action permit();
+    default_action deny();   /* secure default: deny unmatched */
 }
 
 table mac_rewrite {
@@ -156,11 +173,14 @@ table mac_rewrite {
 /* --------------------- control flow ------------------------ */
 control ingress {
     if (valid(srh)) {
-        apply(local_sid);       /* stage 0 */
+        apply(sl_check);        /* stage 0: drop SL=0 */
     }
-    apply(route);               /* stage 1 */
+    if (valid(srh)) {
+        apply(local_sid);       /* stage 1 */
+    }
+    apply(route);               /* stage 2 */
     if (valid(udp)) {
-        apply(acl);             /* stage 2 */
+        apply(acl);             /* stage 3 */
     }
     apply(mac_rewrite);         /* stage 3 */
 }

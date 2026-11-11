@@ -1,5 +1,7 @@
 # Encrypted traffic classification (p4/enc_classify.p4)
 #
+# hop_check: drop TTL=0 packets (RFC 1812)
+table_add ttl_check ttl_expired 0 =>
 # classify_t: run MLP on TLS application data (type 23)
 table_add classify_t classify 23 =>
 # qos_t: QoS marking per traffic class

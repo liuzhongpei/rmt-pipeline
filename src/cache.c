@@ -72,9 +72,11 @@ struct rmt_cache {
 rmt_cache_t *rmt_cache_create(const char *name, int nslots)
 {
     rmt_cache_t *c = (rmt_cache_t *)calloc(1, sizeof(*c));
+    if (!c) return NULL;
     snprintf(c->name, sizeof(c->name), "%s", name);
     c->nslots = nslots > 0 ? nslots : 64;
     c->slots = (cache_slot_t *)calloc((size_t)c->nslots, sizeof(*c->slots));
+    if (!c->slots) { free(c); return NULL; }
     c->ttl = UINT64_MAX;                 /* aging off by default      */
     /* lock is zero-initialized by calloc (ATOMIC_FLAG_INIT) */
     return c;
@@ -127,7 +129,7 @@ static cache_slot_t *alloc_slot(rmt_cache_t *c, const uint8_t *k)
         if (!victim || s->seq < victim->seq)
             victim = s;
     }
-    c->evictions++;
+    atomic_fetch_add(&c->evictions, 1);
     victim->used = false;
     return victim;
 }
@@ -138,11 +140,11 @@ bool rmt_cache_get(rmt_cache_t *c, const fv_t *key,
     spin_lock(&c->lock);
     cache_slot_t *s = find(c, key->v);
     if (RMT_UNLIKELY(!s)) {
-        c->misses++;
+        atomic_fetch_add(&c->misses, 1);
         spin_unlock(&c->lock);
         return false;
     }
-    c->hits++;
+    atomic_fetch_add(&c->hits, 1);
     int n = s->len < cap ? s->len : cap;
     if (data && n > 0)
         memcpy(data, s->data, (size_t)n);
@@ -176,7 +178,7 @@ bool rmt_cache_put(rmt_cache_t *c, const fv_t *key,
     s->len = len > 0 ? len : 0;
     s->aux = aux;
     s->seq = ++c->seq;
-    c->inserts++;
+    atomic_fetch_add(&c->inserts, 1);
     spin_unlock(&c->lock);
     return true;
 }
@@ -186,11 +188,11 @@ bool rmt_cache_take(rmt_cache_t *c, const fv_t *key, uint64_t *aux)
     spin_lock(&c->lock);
     cache_slot_t *s = find(c, key->v);
     if (RMT_UNLIKELY(!s)) {
-        c->misses++;
+        atomic_fetch_add(&c->misses, 1);
         spin_unlock(&c->lock);
         return false;
     }
-    c->hits++;
+    atomic_fetch_add(&c->hits, 1);
     if (aux)
         *aux = s->aux;
     s->used = false;
@@ -231,7 +233,7 @@ void rmt_cache_mark(rmt_cache_t *c, const fv_t *key)
         memcpy(s->key, key->v, 16);
         s->used = true;
         s->len = 0;
-        c->inserts++;
+        atomic_fetch_add(&c->inserts, 1);
     }
     s->aux = c->epoch;                   /* utilization timestamp     */
     s->seq = ++c->seq;
@@ -248,9 +250,9 @@ bool rmt_cache_probe(rmt_cache_t *c, const fv_t *key)
         s = NULL;
     }
     if (s)
-        c->hits++;
+        atomic_fetch_add(&c->hits, 1);
     else
-        c->misses++;
+        atomic_fetch_add(&c->misses, 1);
     spin_unlock(&c->lock);
     return s != NULL;
 }
@@ -266,14 +268,14 @@ int rmt_cache_live(rmt_cache_t *c)
     return n;
 }
 
-void rmt_cache_print_stats(const rmt_cache_t *c)
+void rmt_cache_print_stats(rmt_cache_t *c)
 {
     int used = 0;
-    spin_lock((spin_t *)&c->lock);
+    spin_lock(&c->lock);
     for (int i = 0; i < c->nslots; i++)
         if (c->slots[i].used)
             used++;
-    spin_unlock((spin_t *)&c->lock);
+    spin_unlock(&c->lock);
     printf("  cache %-6s: %d/%d entries, %llu hits, %llu misses, "
            "%llu inserts, %llu evictions\n",
            c->name, used, c->nslots,

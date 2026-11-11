@@ -2,20 +2,27 @@
 #
 #   table_add <table> <action> <keys...> => <action params...>
 
-# --- stage 0: local SID table ("My SID": execute SRv6 End behavior) ---
+# --- stage 0: drop packets with exhausted SRH (SL=0) ---
+table_add sl_check sl_exhausted 0 =>
+
+# --- stage 1: local SID table ("My SID": execute SRv6 End behavior) ---
 table_add local_sid srv6_end fd00::2/128 =>
 
-# --- stage 1: IPv6 LPM routing ---
+# --- stage 2: IPv6 LPM routing ---
 table_add route forward fd00::3/128    => 2
 table_add route forward fd00::9/128    => 3
 table_add route forward 2001:db8::/64  => 5
 
-# --- stage 2: 5-tuple ACL (src, dst, proto, sport, dport) ---
-# permit the SRv6 demo flow (proto 43 = IPv6 Routing header)
-table_add acl permit fd00::1/128 fd00::3/128 43 5000 6000 =>
+# --- stage 3: 5-tuple ACL (src, dst, proto, sport, dport) ---
+# permit the SRv6 demo flow (proto 43 = IPv6 Routing header).
+# The source is the local segment (fd00::/64) so the benchmark can vary
+# it; after End the destination is seg[1]=fd00::3 (SL was 2) or
+# seg[0]=fd00::9 (SL was 1), so both are permitted.
+table_add acl permit fd00::/64 fd00::3/128 43 5000 6000 =>
+table_add acl permit fd00::/64 fd00::9/128 43 5000 6000 =>
 # deny a plain IPv6/UDP flow (proto 17 = UDP)
 table_add acl deny 2001:db8::1/128 2001:db8::2/128 17 1234 80 =>
 
-# --- stage 3: MAC rewrite per egress port ---
+# --- stage 4: MAC rewrite per egress port ---
 table_add mac_rewrite set_macs 2 => 0a:0b:0c:0d:0e:0f 0a:0b:0c:0d:0e:01
 table_add mac_rewrite set_macs 3 => 0a:0b:0c:0d:0e:0f 0a:0b:0c:0d:0e:02

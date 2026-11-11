@@ -30,7 +30,9 @@ static const char *op_name[] = {
     "addi", "subi", "andi", "ori", "xori", "shli", "shri",
     "movx", "validate", "invalidate",
     "cs_lookup", "cs_insert", "pit_insert", "pit_consume",
-    "util_mark", "util_probe", "dnn_infer"
+    "util_mark", "util_probe",
+    "sketch_inc", "sketch_get",
+    "dnn_infer"
 };
 
 typedef struct {
@@ -59,6 +61,7 @@ void rmt_action_exec(const rmt_pipeline_t *p, const rmt_action_t *a,
         [OP_CS_LOOKUP] = &&L_CS_LOOKUP, [OP_CS_INSERT] = &&L_CS_INSERT,
         [OP_PIT_INSERT] = &&L_PIT_INSERT, [OP_PIT_CONSUME] = &&L_PIT_CONSUME,
         [OP_UTIL_MARK] = &&L_UTIL_MARK, [OP_UTIL_PROBE] = &&L_UTIL_PROBE,
+        [OP_SKETCH_INC] = &&L_SKETCH_INC, [OP_SKETCH_GET] = &&L_SKETCH_GET,
         [OP_DNN_INFER] = &&L_DNN_INFER
     };
 #endif
@@ -66,6 +69,8 @@ void rmt_action_exec(const rmt_pipeline_t *p, const rmt_action_t *a,
     for (int w = 0; w < a->nwords; w++) {
         wb_t wb[RMT_NUM_ALUS];
         int nwb = a->nslots[w];
+        if (nwb < 0 || nwb > RMT_NUM_ALUS)   /* bounds guard */
+            nwb = RMT_NUM_ALUS;
 
         /* ---- execute all 16 ALUs of this word in parallel ---- */
         for (int s = 0; s < nwb; s++) {
@@ -218,6 +223,20 @@ void rmt_action_exec(const rmt_pipeline_t *p, const rmt_action_t *a,
                 r = (uint64_t)rmt_dnn_infer(dn, x);
                 goto L_COMMIT;
             }
+            L_SKETCH_INC: {
+                /* atomic increment of d counters (fire-and-forget) */
+                if (in->imm >= 0 && in->imm < p->nsketches)
+                    rmt_sketch_inc(p->sketches[in->imm], phv);
+                continue;
+            }
+            L_SKETCH_GET: {
+                /* estimate flow frequency → write min to fd */
+                if (in->imm >= 0 && in->imm < p->nsketches) {
+                    r = (uint64_t)rmt_sketch_get(p->sketches[in->imm], phv);
+                    goto L_COMMIT;
+                }
+                continue;
+            }
 
             L_COMMIT:
 #else
@@ -360,6 +379,18 @@ void rmt_action_exec(const rmt_pipeline_t *p, const rmt_action_t *a,
                 r = (uint64_t)rmt_dnn_infer(dn, x);
                 break;
             }
+            case OP_SKETCH_INC: {
+                if (in->imm >= 0 && in->imm < p->nsketches)
+                    rmt_sketch_inc(p->sketches[in->imm], phv);
+                continue;
+            }
+            case OP_SKETCH_GET: {
+                if (in->imm >= 0 && in->imm < p->nsketches) {
+                    r = (uint64_t)rmt_sketch_get(p->sketches[in->imm], phv);
+                    break;
+                }
+                continue;
+            }
             }
 #endif
 
@@ -385,9 +416,11 @@ void rmt_action_exec(const rmt_pipeline_t *p, const rmt_action_t *a,
 
         /* ---- commit phase: all writes land simultaneously ---- */
         for (int s = 0; s < nwb; s++) {
-            if (wb[s].kind == 1)
+            if (wb[s].kind == 1) {
                 phv->fields[wb[s].fd] = wb[s].val;
-            else if (wb[s].kind == 2) {
+                phv_field_dirty(phv, wb[s].fd);      /* in-place track */
+            } else if (wb[s].kind == 2) {
+                phv->structural = true;              /* hdr add/remove */
                 if (wb[s].valid)
                     phv_hdr_set(phv, wb[s].fd);
                 else

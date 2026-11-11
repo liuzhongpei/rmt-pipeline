@@ -104,9 +104,16 @@ static void train_model(int nsamp, int epochs, float lr) {
     for (int i = 0; i < NOUT*NHID; i++) W2[i] = scale2 * (2.0f * rand() / RAND_MAX - 1);
     for (int k = 0; k < NOUT; k++) B2[k] = 0.01f * ((rand() % 100) - 50) / 50.0f;
 
-    /* Training loop with early stopping */
+    /* Training loop with early stopping. Seed the "best" snapshot with
+     * the initial weights so the restore below is always defined, even
+     * when the first epoch does not improve on best_acc (e.g. 0 epochs
+     * or an empty/NaN training set). */
     float best_acc = 0;
     float best_W1[NHID*NIN], best_B1[NHID], best_W2[NOUT*NHID], best_B2[NOUT];
+    memcpy(best_W1, W1, sizeof(best_W1));
+    memcpy(best_B1, B1, sizeof(best_B1));
+    memcpy(best_W2, W2, sizeof(best_W2));
+    memcpy(best_B2, B2, sizeof(best_B2));
 
     for (int ep = 0; ep < epochs; ep++) {
         float loss = 0;
@@ -150,7 +157,8 @@ static void train_model(int nsamp, int epochs, float lr) {
             memset(grad_h, 0, sizeof(grad_h));
             for (int k = 0; k < NOUT; k++) {
                 float g = grad_o[k];
-                if (g > 2.0f) g = 2.0f; if (g < -2.0f) g = -2.0f;
+                if (g > 2.0f) g = 2.0f;
+                if (g < -2.0f) g = -2.0f;
                 B2[k] -= lr * g;
                 for (int j = 0; j < NHID; j++) {
                     W2[k*NHID+j] -= lr * g * h[j];
@@ -160,7 +168,8 @@ static void train_model(int nsamp, int epochs, float lr) {
             for (int j = 0; j < NHID; j++) {
                 if (h[j] <= 0) continue;
                 float g = grad_h[j];
-                if (g > 1.0f) g = 1.0f; if (g < -1.0f) g = -1.0f;
+                if (g > 1.0f) g = 1.0f;
+                if (g < -1.0f) g = -1.0f;
                 B1[j] -= lr * g;
                 for (int i = 0; i < NIN; i++) {
                     W1[j*NIN+i] -= lr * g * f[i];
@@ -215,16 +224,27 @@ typedef struct {
     char label[32];
 } label_t;
 
+static int label_cmp(const void* a, const void* b) {
+    const label_t* x = (const label_t*)a;
+    const label_t* y = (const label_t*)b;
+    return (x->pkt_idx > y->pkt_idx) - (x->pkt_idx < y->pkt_idx);
+}
+
 static label_t* load_labels(const char* filename, int* count) {
     FILE* f = fopen(filename, "r");
     if (!f) return NULL;
 
     label_t* labels = calloc(MAX_PKTS, sizeof(label_t));
+    if (!labels) { fclose(f); return NULL; }
     char line[256];
     int n = 0;
 
-    /* Skip header */
-    fgets(line, sizeof(line), f);
+    /* Skip header (empty file -> no samples) */
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        *count = 0;
+        return labels;
+    }
 
     while (fgets(line, sizeof(line), f) && n < MAX_PKTS) {
         int idx;
@@ -238,6 +258,9 @@ static label_t* load_labels(const char* filename, int* count) {
         }
     }
     fclose(f);
+    /* the caller matches labels against packets with a monotonic cursor:
+     * make that valid regardless of the CSV row order                 */
+    qsort(labels, (size_t)n, sizeof(label_t), label_cmp);
     *count = n;
     return labels;
 }
@@ -312,6 +335,7 @@ int main(int argc, char** argv) {
     uint8_t pkt_buf[MAX_PKT_SIZE];
 
     int total_pkts = 0;
+    int label_cur = 0;          /* cursor over the (sorted) labels CSV */
     int classified_pkts = 0;
     int correct = 0;
     int class_counts[5] = {0};
@@ -371,9 +395,14 @@ int main(int argc, char** argv) {
             class_counts[4]++;
         }
 
-        /* Ground truth comparison */
-        if (labels && total_pkts - 1 < n_labels) {
-            int expected = label_to_class(labels[total_pkts - 1].label);
+        /* Ground truth comparison: match on the packet index recorded in
+         * the CSV (rows may be sparse; only pkt_idx is authoritative) */
+        while (labels && label_cur < n_labels &&
+               labels[label_cur].pkt_idx < total_pkts - 1)
+            label_cur++;
+        if (labels && label_cur < n_labels &&
+            labels[label_cur].pkt_idx == total_pkts - 1) {
+            int expected = label_to_class(labels[label_cur].label);
             if (expected >= 0) {
                 class_total[expected]++;
                 if (predicted == expected) {
@@ -381,6 +410,7 @@ int main(int argc, char** argv) {
                     class_correct[expected]++;
                 }
             }
+            label_cur++;
         }
 
         if (total_pkts % 500 == 0) {
@@ -396,13 +426,17 @@ int main(int argc, char** argv) {
     printf("Total packets processed: %d\n", total_pkts);
     printf("TLS (port 443) packets:  %d\n", tls_pkts);
     printf("Classified packets:      %d\n", classified_pkts);
-    printf("  Classification rate:   %.1f%% of total\n",
-           100.0 * classified_pkts / total_pkts);
+    if (total_pkts > 0) {
+        printf("  Classification rate:   %.1f%% of total\n",
+               100.0 * classified_pkts / total_pkts);
 
-    printf("\nClassification distribution:\n");
-    for (int i = 0; i < 5; i++) {
-        printf("  %-13s: %5d (%.1f%%)\n", class_names[i], class_counts[i],
-               100.0 * class_counts[i] / total_pkts);
+        printf("\nClassification distribution:\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  %-13s: %5d (%.1f%%)\n", class_names[i], class_counts[i],
+                   100.0 * class_counts[i] / total_pkts);
+        }
+    } else {
+        printf("  (no packets to classify)\n");
     }
 
     /* ToS histogram */
@@ -437,12 +471,16 @@ int main(int argc, char** argv) {
                total_labeled > 0 ? 100.0 * correct / total_labeled : 0);
     }
 
-    printf("\nLatency statistics:\n");
-    printf("  Mean:   %7.0f ns/pkt\n", total_latency_ns / total_pkts);
-    printf("  Min:    %7.0f ns/pkt\n", min_latency_ns);
-    printf("  Max:    %7.0f ns/pkt\n", max_latency_ns);
-    printf("  Throughput: %.2f Mpps\n",
-           total_pkts / (total_latency_ns / 1e9) / 1e6);
+    if (total_pkts > 0) {
+        printf("\nLatency statistics:\n");
+        printf("  Mean:   %7.0f ns/pkt\n", total_latency_ns / total_pkts);
+        printf("  Min:    %7.0f ns/pkt\n", min_latency_ns);
+        printf("  Max:    %7.0f ns/pkt\n", max_latency_ns);
+        printf("  Throughput: %.2f Mpps\n",
+               total_pkts / (total_latency_ns / 1e9) / 1e6);
+    } else {
+        printf("\nLatency statistics: (no packets)\n");
+    }
 
     /* DNN stats */
     printf("\nDNN statistics:\n");

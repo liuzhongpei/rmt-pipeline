@@ -32,15 +32,25 @@ static void chk(const char *what, bool ok)
 }
 
 /* ------------------- NDN packet construction ------------------- */
-/* eth(14) | ndn: pkt_type(1) hop_limit(1) name(16) nonce(4) | payload */
-#define NDN_OFF   14
-#define NAME_OFF  16
-#define PAYL_OFF  36
+/* eth(14) | ndn: pkt_type(1) hop_limit(1) lifetime(2) name(16)
+ *           nonce(4) error_code(1) reserved(1) | payload */
+#define NDN_OFF    14
+#define LIFETIME_OFF 16
+#define NAME_OFF   18
+#define NONCE_OFF  34
+#define ERR_OFF    38
+#define PAYL_OFF   40
 
 static void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
+static void put16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
 }
 
 static void mk_ndn(rmt_pkt_t *pkt, int type, const uint8_t smac_tag,
@@ -53,11 +63,14 @@ static void mk_ndn(rmt_pkt_t *pkt, int type, const uint8_t smac_tag,
     memcpy(d, (uint8_t[]){ 0xaa, 0, 0, 0, 0xee, 0x01 }, 6);
     memcpy(d + 6, (uint8_t[]){ 0x02, 0, 0, 0, 0, smac_tag }, 6);
     d[12] = 0x86; d[13] = 0x24;
-    d[NDN_OFF] = (uint8_t)type;        /* 1 Interest, 2 Data */
-    d[NDN_OFF + 1] = 64;               /* hop limit          */
-    put32(d + NAME_OFF, c0);           /* name components    */
+    d[NDN_OFF] = (uint8_t)type;        /* 1 Interest, 2 Data, 3 NACK */
+    d[NDN_OFF + 1] = 64;               /* hop limit */
+    put16(d + LIFETIME_OFF, 100);      /* lifetime = 10 seconds */
+    put32(d + NAME_OFF, c0);           /* name components */
     put32(d + NAME_OFF + 4, c1);
-    put32(d + 32, nonce);
+    put32(d + NONCE_OFF, nonce);
+    d[ERR_OFF] = 0;                    /* error_code (0 = normal) */
+    d[ERR_OFF + 1] = 0;                /* reserved */
     pkt->len = PAYL_OFF;
     if (content) {
         size_t n = strlen(content);
@@ -67,6 +80,7 @@ static void mk_ndn(rmt_pkt_t *pkt, int type, const uint8_t smac_tag,
 }
 
 static bool is_data(const rmt_pkt_t *p)   { return p->data[NDN_OFF] == 2; }
+static bool is_nack(const rmt_pkt_t *p)   { return p->data[NDN_OFF] == 3; }
 static bool payload_is(const rmt_pkt_t *p, const char *s)
 {
     size_t n = strlen(s);
@@ -90,6 +104,7 @@ int main(int argc, char **argv)
 
     printf("=== NDN demo: name-based forwarding + in-network cache ===\n\n");
     rmt_pipeline_t *edge = rmt_create(), *core = rmt_create();
+    if (!edge || !core) { fprintf(stderr, "ndn_demo: rmt_create failed\n"); return 1; }
     if (p4c_compile_file(edge, "p4/ndn.p4") < 0 ||
         rmt_load_entries(edge, "entries/ndn_edge.txt") < 0 ||
         p4c_compile_file(core, "p4/ndn.p4") < 0 ||
@@ -147,12 +162,16 @@ int main(int argc, char **argv)
     chk("edge: /video/seg2 not cached -> forwarded to core",
         !o1.dropped && !is_data(&o1) && o1.out_port == 2);
 
-    /* -- 5. name outside the FIB: dropped by /0 catch-all -- */
-    printf("\n---- 5. Interest /music/... (no FIB route) ----\n");
-    mk_ndn(&in, 1, 0xc1, C_MUSIC, C_SEG1, 0x4444, NULL);
+    /* -- 5. name outside the FIB: generates NACK back to consumer -- */
+    printf("\n---- 5. Interest /zzz/... (no FIB route -> NACK) ----\n");
+    mk_ndn(&in, 1, 0xc1, C_ZZZ, C_SEG1, 0x4444, NULL);
     in.in_port = 1;
     rmt_process(edge, &in, &o1);
-    chk("edge: unroutable Interest dropped", o1.dropped);
+    chk("edge: unroutable Interest -> NACK returned",
+        !o1.dropped && is_nack(&o1) && o1.out_port == 1);
+    chk("edge: NACK carries original name",
+        o1.data[NAME_OFF] == (C_ZZZ >> 24) &&
+        o1.data[NAME_OFF + 4] == (C_SEG1 >> 24));
 
     /* -- 6. unsolicited Data (no PIT entry): dropped -- */
     printf("\n---- 6. unsolicited Data /video/zzz ----\n");
@@ -172,13 +191,57 @@ int main(int argc, char **argv)
     chk("edge: 1st Interest forwarded, 2nd (same name pending) aggregated",
         !o1.dropped && o1.out_port == 2 && o2.dropped);
 
+    /* -- 8. hop limit exhaustion: packet with hop_limit=0 dropped -- */
+    printf("\n---- 8. Hop limit exhaustion (TTL=0) ----\n");
+    mk_ndn(&in, 1, 0xc1, C_VIDEO, C_SEG1, 0xaaaa, NULL);
+    in.data[NDN_OFF + 1] = 0;   /* force hop_limit = 0 */
+    in.in_port = 1;
+    rmt_process(edge, &in, &o1);
+    chk("edge: hop_limit=0 packet dropped", o1.dropped);
+
+    /* -- 9. nonce loop detection: re-insert same nonce -> drop -- */
+    printf("\n---- 9. Nonce loop detection ----\n");
+    /* Use a unique name AND nonce that hasn't been seen */
+    mk_ndn(&in, 1, 0xc1, C_MUSIC, C_SEG2, 0xbbbbbbbb, NULL);
+    in.in_port = 1;
+    rmt_process(edge, &in, &o1);
+    chk("edge: first Interest with new nonce forwarded",
+        !o1.dropped && o1.out_port == 2);
+    /* Now send it back as if it looped (same nonce, re-entering edge) */
+    mk_ndn(&in, 1, 0xc1, C_MUSIC, C_SEG2, 0xbbbbbbbb, NULL);
+    in.in_port = 2;   /* coming back from core */
+    rmt_process(edge, &in, &o2);
+    chk("edge: duplicate nonce Interest dropped (loop detect)",
+        o2.dropped);
+
+    /* -- 10. Interest lifetime field present -- */
+    printf("\n---- 10. Interest lifetime ----\n");
+    mk_ndn(&in, 1, 0xc1, C_VIDEO, C_SEG1, 0xcccccccc, NULL);
+    in.in_port = 1;
+    rmt_process(edge, &in, &o1);
+    /* lifetime at offset 16 (2 bytes, big-endian); we set 100 (0x0064) */
+    chk("lifetime field preserved after forwarding",
+        o1.data[LIFETIME_OFF] == 0x00 && o1.data[LIFETIME_OFF + 1] == 100);
+
+    /* -- 11. NACK error code check -- */
+    printf("\n---- 11. NACK error code ----\n");
+    mk_ndn(&in, 1, 0xc1, C_ZZZ, C_SEG2, 0xdddddddd, NULL);
+    in.in_port = 1;
+    rmt_process(edge, &in, &o1);
+    chk("NACK error_code = 1 (no route)",
+        is_nack(&o1) && o1.data[ERR_OFF] == 1);
+
     printf("\ncache statistics:\n");
     printf(" edge:\n");
     for (int i = 0; i < edge->ncaches; i++)
         rmt_cache_print_stats(edge->caches[i]);
+    for (int i = 0; i < edge->nsketches; i++)
+        rmt_sketch_print_stats(edge->sketches[i]);
     printf(" core:\n");
     for (int i = 0; i < core->ncaches; i++)
         rmt_cache_print_stats(core->caches[i]);
+    for (int i = 0; i < core->nsketches; i++)
+        rmt_sketch_print_stats(core->sketches[i]);
 
     rmt_destroy(edge);
     rmt_destroy(core);
